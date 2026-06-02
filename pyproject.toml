@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "routehijack"
+version = "0.1.0"
+description = "RouteHijack — a routing-aware, input-only adversarial-suffix jailbreak for Mixture-of-Experts LLMs."
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.3",
+  "transformers>=4.45",
+  "accelerate>=0.33",
+  "datasets>=2.20",
+  "huggingface_hub>=0.24",
+  "numpy>=1.26",
+  "pyyaml>=6",
+  "tqdm>=4.66",
+  "rich>=13",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.5"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["routehijack*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"

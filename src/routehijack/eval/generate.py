@@ -1,0 +1,183 @@
+"""Generation with arbitrary router / expert mutators.
+
+The attack modules supply their own router/expert mutators (RouteHijack's
+router capture, SAE inversion's expert mutator), wired through the same
+`MoEHookManager` machinery.
+
+`DefenseBundle` is kept for name compatibility but is just a generic hook
+bundle: any callable matching the mutator signature can be plugged in.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Callable, Optional
+
+import torch
+
+from ..model.hooks import MoEHookManager
+
+
+RouterMutator = Callable[[torch.Tensor, int, int], torch.Tensor]   # (logits, layer, step) -> logits
+ExpertMutator = Callable[[torch.Tensor, int, int, int], torch.Tensor]  # (out, layer, expert, step) -> out
+
+
+@dataclass
+class DefenseBundle:
+    """Renamed semantically but kept the same class name so existing eval code
+    doesn't need rewiring. Holds any router / expert mutators."""
+
+    router_mutator: Optional[RouterMutator] = None
+    expert_mutators: dict[tuple[int, int], ExpertMutator] = field(default_factory=dict)
+    moe_out_mutators: dict[int, Callable] = field(default_factory=dict)   # layer -> fn (moe_out tap)
+
+
+@torch.no_grad()
+def generate_with_defense(
+    model,
+    tokenizer,
+    prompt: str,
+    *,
+    defense: DefenseBundle = DefenseBundle(),
+    max_new_tokens: int = 128,
+    do_sample: bool = False,
+    temperature: float = 1.0,
+    device: str | torch.device | None = None,
+    spec=None,
+    want_template: bool = True,
+) -> str:
+    from ..model.prompting import encode_prompt
+    device = device or next(model.parameters()).device
+    ids = encode_prompt(tokenizer, prompt, want_template=want_template, device=device).unsqueeze(0)
+
+    with MoEHookManager(model, spec) as hm:
+        if defense.router_mutator is not None:
+            hm.set_router_mutator(defense.router_mutator)
+        for (layer, expert), fn in defense.expert_mutators.items():
+            hm.set_expert_mutator(layer, expert, fn)
+        for layer, fn in defense.moe_out_mutators.items():
+            hm.set_moe_out_mutator(layer, fn)
+
+        out_ids = ids
+        past_key_values = None
+        for _ in range(max_new_tokens):
+            step_input = out_ids[:, -1:] if past_key_values is not None else out_ids
+            outputs = model(
+                input_ids=step_input,
+                past_key_values=past_key_values,
+                use_cache=True,
+            )
+            past_key_values = outputs.past_key_values
+            next_logits = outputs.logits[:, -1, :]
+            if do_sample:
+                probs = (next_logits / max(temperature, 1e-5)).softmax(-1)
+                next_id = torch.multinomial(probs, 1)
+            else:
+                next_id = next_logits.argmax(-1, keepdim=True)
+            out_ids = torch.cat([out_ids, next_id], dim=-1)
+            hm.advance_step()
+            if tokenizer.eos_token_id is not None and int(next_id.item()) == tokenizer.eos_token_id:
+                break
+
+    completion = tokenizer.decode(out_ids[0, ids.shape[1]:], skip_special_tokens=True)
+    return completion
+
+
+@torch.no_grad()
+def generate_batch(
+    model,
+    tokenizer,
+    prompts: list[str],
+    *,
+    max_new_tokens: int = 128,
+    do_sample: bool = False,
+    temperature: float = 1.0,
+    device: str | torch.device | None = None,
+    batch_size: int = 8,
+    want_template: bool = True,
+    desc: str = "generate",
+) -> list[str]:
+    """Greedy (or sampled) generation over many prompts, BATCHED for GPU use.
+
+    The per-prompt `generate_with_defense` decodes one sequence at a time (batch-1),
+    which starves the GPU — fine when you need router/expert mutators, wasteful for
+    plain scoring. This path has no mutators and uses the model's own `generate`
+    with **left-padding** (so decoder-only KV-caching and position ids stay correct
+    across a padded batch), chunked by `batch_size` so a large prompt set doesn't
+    blow up the KV cache. Lower `batch_size` if VRAM-tight; raise it to use more GPU.
+
+    Each prompt is rendered through the chat template (if present) so generation is
+    in-distribution for an instruct model. Returns one completion per prompt, in order.
+    """
+    from .. import ui
+    from ..model.prompting import render_user_turn, use_template
+
+    if not prompts:
+        return []
+    device = device or next(model.parameters()).device
+    templated = use_template(tokenizer, want_template)
+
+    prev_side = tokenizer.padding_side
+    if tokenizer.pad_token_id is None:        # decoder-only tokenizers often lack a pad token
+        tokenizer.pad_token = tokenizer.eos_token   # standard, harmless to leave set
+    tokenizer.padding_side = "left"
+
+    gen_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=do_sample,
+                      pad_token_id=tokenizer.pad_token_id, use_cache=True)
+    if do_sample:
+        gen_kwargs["temperature"] = temperature   # only pass when sampling (avoids a warning)
+
+    completions: list[str] = []
+    try:
+        chunks = [prompts[i:i + batch_size] for i in range(0, len(prompts), batch_size)]
+        with ui.progress_bar(len(prompts), desc=desc) as (prog, tid):
+            for chunk in chunks:
+                rendered = [render_user_turn(tokenizer, c, want_template=want_template) for c in chunk]
+                enc = tokenizer(rendered, return_tensors="pt", padding=True,
+                                add_special_tokens=not templated).to(device)
+                out = model.generate(**enc, **gen_kwargs)
+                new = out[:, enc["input_ids"].shape[1]:]          # drop the (left-padded) prompt
+                completions.extend(tokenizer.batch_decode(new, skip_special_tokens=True))
+                prog.advance(tid, len(chunk))
+    finally:
+        tokenizer.padding_side = prev_side
+    return completions
+
+
+@torch.no_grad()
+def last_prompt_logits(
+    model,
+    tokenizer,
+    prompt: str,
+    *,
+    defense: DefenseBundle = DefenseBundle(),
+    device: str | torch.device | None = None,
+    spec=None,
+    want_template: bool = True,
+) -> torch.Tensor:
+    """Logits at the final prompt position (vocab,), with mutators installed.
+
+    Used by the greedy causal filter's cheap jailbreak proxy — Beyond Sorry track
+    the probability of the first-person pronoun "I" here. Rendered through the chat
+    template so the boundary is the real response-start position; otherwise P("I")
+    isn't a refusal opener and the proxy measures noise.
+    """
+    from ..model.prompting import encode_prompt
+    device = device or next(model.parameters()).device
+    ids = encode_prompt(tokenizer, prompt, want_template=want_template, device=device).unsqueeze(0)
+    with MoEHookManager(model, spec) as hm:
+        if defense.router_mutator is not None:
+            hm.set_router_mutator(defense.router_mutator)
+        for (layer, expert), fn in defense.expert_mutators.items():
+            hm.set_expert_mutator(layer, expert, fn)
+        for layer, fn in defense.moe_out_mutators.items():
+            hm.set_moe_out_mutator(layer, fn)
+        out = model(input_ids=ids, use_cache=False)
+    return out.logits[0, -1]
+
+
+def prob_of_token(logits: torch.Tensor, tokenizer, token_str: str = " I") -> float:
+    """Softmax probability of `token_str`'s first sub-token at the given logits row."""
+    tid = tokenizer(token_str, add_special_tokens=False).input_ids
+    if not tid:
+        return 0.0
+    return float(logits.float().softmax(-1)[tid[0]].item())
