@@ -28,6 +28,13 @@ MODELS: dict[str, str] = {
     "qwen2_moe": "configs/qwen2_moe.yaml",
     "qwen3": "configs/qwen3_moe.yaml",
     "qwen3_moe": "configs/qwen3_moe.yaml",
+    "qwen3-235b": "configs/qwen3_235b_a22b.yaml",
+    "qwen3_235b": "configs/qwen3_235b_a22b.yaml",
+    "qwen3-235b-a22b": "configs/qwen3_235b_a22b.yaml",
+    "qwen3.5": "configs/qwen3_5_moe.yaml",        # best-effort / unverified — see the config header
+    "qwen3_5": "configs/qwen3_5_moe.yaml",
+    "qwen3.6": "configs/qwen3_6_35b_a3b.yaml",     # dims verified from config.json (hybrid attention)
+    "qwen3_6": "configs/qwen3_6_35b_a3b.yaml",
     "smoke": "configs/smoke.yaml",
 }
 
@@ -68,7 +75,13 @@ _HF_TYPE_TO_PRESET: dict[str, str] = {
     "olmoe": "olmoe",
     "mixtral": "mixtral",
     "qwen2_moe": "qwen",
-    "qwen3_moe": "qwen",
+    "qwen3_moe": "qwen",       # covers Qwen3-30B-A3B, Qwen3-235B-A22B
+    "qwen3_next": "qwen",      # best-effort: Qwen3-Next hybrid MoE (standard Linear gate)
+    "qwen3_5_moe": "qwen",     # Qwen3.5 / Qwen3.6 hybrid-attention MoE (every layer has a standard
+                              # MoE mlp; linear/full attention sublayers don't affect router capture)
+    "phimoe": "phimoe",
+    # DeepSeekMoE is handled as a separate experiment under mhc/ (its grouped/biased
+    # gate is not steerable by the suffix attack); it is deliberately not mapped here.
 }
 
 
@@ -97,9 +110,10 @@ def _model_ns_from_hf(hf_cfg, model_id: str, *, dtype: str, device_map: str) -> 
         raise UnsupportedModelError(
             f"'{model_id}' (model_type={mt!r}) is not a supported MoE. This tool needs a "
             f"routed-expert Mixture-of-Experts; supported families: OLMoE, Mixtral, "
-            f"Qwen2-MoE, Qwen3-MoE (model_type {sorted(_HF_TYPE_TO_PRESET)}). "
-            f"Dense models and other MoE variants (e.g. DeepSeek, Phi-MoE, GPT-OSS) need a "
-            f"hand-written config in configs/ plus a matching ArchSpec preset in model/archspec.py."
+            f"Qwen2/3-MoE, Phi-MoE (model_type {sorted(_HF_TYPE_TO_PRESET)}). Other MoE "
+            f"variants (e.g. DBRX, GPT-OSS, Granite-MoE) need a hand-written config in "
+            f"configs/ plus a matching ArchSpec preset in model/archspec.py. DeepSeek-V4 / "
+            f"mHC is handled as a separate experiment under mhc/ (see mhc/README.md)."
         )
     return SimpleNamespace(
         hf_id=model_id, dtype=dtype, device_map=device_map,
@@ -130,7 +144,10 @@ def from_hf(model_id: str, *, template: str = "base",
         ) from e
     cfg = load(template)
     cfg.model = _model_ns_from_hf(hf_cfg, model_id, dtype=dtype, device_map=device_map)
-    cfg.sae.d_input = cfg.model.d_model
+    # The SAE pipeline is optional (and absent from the trimmed default template);
+    # only pin its input dim if the template actually carries an `sae` block.
+    if hasattr(cfg, "sae"):
+        cfg.sae.d_input = cfg.model.d_model
     return cfg
 
 

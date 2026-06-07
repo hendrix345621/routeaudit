@@ -701,25 +701,53 @@ class RouteHijackAttack:
 @torch.no_grad()
 def measure_routing_shift(model, tokenizer, safety_experts, harmful_experts,
                           clean_prompts: list[str], attacked_prompts: list[str],
-                          device=None, spec=None, use_chat_template: bool = True) -> dict:
+                          device=None, spec=None, use_chat_template: bool = True,
+                          batch_size: int = 8) -> dict:
     """Replicates RouteHijack's TESR / THPR metrics (paper Table 4, p. 9):
 
       TESR (Target Expert Suppression Rate) = ΔP(safety experts at boundary)
       THPR (Target Harmful Promotion Rate)  = ΔP(harmful experts at boundary)
 
     Measured at the boundary token t* — the last input position of the templated
-    prompt (the routing decision point), to match how the attack is optimized."""
-    from ..model.prompting import encode_prompt
+    prompt (the routing decision point), to match how the attack is optimized.
+
+    Batched (RIGHT-padded) for GPU use: each row's boundary is its last real token
+    (attention_mask.sum-1); with right padding the real tokens keep positions 0..L-1
+    so the captured boundary logits are identical to scoring each prompt alone."""
+    from ..model.prompting import render_user_turn, use_template
     device = device or next(model.parameters()).device
     safety_map = _layer_map(safety_experts)
     harmful_map = _layer_map(harmful_experts)
+    templated = use_template(tokenizer, use_chat_template)
 
-    def _boundary_probs(prompt):
-        ids = encode_prompt(tokenizer, prompt, want_template=use_chat_template, device=device).unsqueeze(0)
-        with MoEHookManager(model, spec) as hm:
-            hm.capture_router_logits()
-            model(input_ids=ids, use_cache=False)
-        return {l: v.view(ids.shape[1], -1)[-1].softmax(-1).cpu() for l, v in hm.capture.router_logits.items()}
+    def _boundary_probs_batch(prompts):
+        """Return a list of {layer: probs(E,)} at t* for each prompt, batched."""
+        out = []
+        prev_side = tokenizer.padding_side
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.padding_side = "right"
+        try:
+            for i in range(0, len(prompts), batch_size):
+                chunk = prompts[i:i + batch_size]
+                rendered = [render_user_turn(tokenizer, p, want_template=use_chat_template) for p in chunk]
+                enc = tokenizer(rendered, return_tensors="pt", padding=True,
+                                add_special_tokens=not templated).to(device)
+                bsz, seqlen = enc["input_ids"].shape
+                last_idx = enc["attention_mask"].sum(dim=1) - 1
+                with MoEHookManager(model, spec) as hm:
+                    hm.capture_router_logits()
+                    model(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"],
+                          use_cache=False)
+                    cap = hm.capture.router_logits
+                # gate output is (bsz*seqlen, E) → (bsz, seqlen, E); read each row's boundary.
+                reshaped = {l: v.view(bsz, seqlen, -1) for l, v in cap.items()}
+                for b in range(len(chunk)):
+                    bi = int(last_idx[b])
+                    out.append({l: v[b, bi].softmax(-1).cpu() for l, v in reshaped.items()})
+        finally:
+            tokenizer.padding_side = prev_side
+        return out
 
     def _mean_mass(rows):
         s_safe, s_harm = [], []
@@ -731,8 +759,8 @@ def measure_routing_shift(model, tokenizer, safety_experts, harmful_experts,
         return (sum(s_safe) / max(1, len(s_safe)),
                 sum(s_harm) / max(1, len(s_harm)))
 
-    clean_safe, clean_harm = _mean_mass([_boundary_probs(p) for p in clean_prompts])
-    atk_safe, atk_harm = _mean_mass([_boundary_probs(p) for p in attacked_prompts])
+    clean_safe, clean_harm = _mean_mass(_boundary_probs_batch(clean_prompts))
+    atk_safe, atk_harm = _mean_mass(_boundary_probs_batch(attacked_prompts))
 
     return {
         "TESR": atk_safe - clean_safe,

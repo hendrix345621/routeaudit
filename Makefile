@@ -29,7 +29,13 @@ eval:
 
 all: data harvest routehijack eval
 
-.PHONY: install data harvest routehijack eval all clean
+# Interactive one-shot: pick a model, run all four phases, stop at the verdict.
+#   make run                      # prompts for the model
+#   make run MODEL=qwen3          # non-interactive
+run:
+	$(PY) scripts/run_all.py $(if $(MODEL),--model $(MODEL) --yes,)
+
+.PHONY: install data harvest routehijack eval all run clean
 
 clean:
 	rm -rf $(ART)

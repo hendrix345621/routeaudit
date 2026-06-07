@@ -1,0 +1,42 @@
+# RouteHijack config — Qwen3-30B-A3B (Qwen3-MoE).
+# 48 layers · 128 experts · top-8 · hidden 2048. Per-layer `.mlp` SparseMoeBlock with
+# `.gate` (Linear → logits) + `.experts` (ModuleList). Unlike Qwen2-MoE, Qwen3-MoE has
+# NO shared expert. Uses the `qwen` ArchSpec preset. (For the 235B sibling see
+# configs/qwen3_235b_a22b.yaml.)
+
+model:
+  hf_id: Qwen/Qwen3-30B-A3B
+  dtype: bfloat16
+  device_map: auto
+  n_layers: 48
+  n_experts: 128
+  top_k: 8
+  d_model: 2048
+  use_chat_template: true
+  arch:
+    name: qwen
+
+identify:
+  pairs_path: ./data/llm_lat_pairs.jsonl
+  general_corpus_path: ./data/c4_general.jsonl
+  n_pairs: 600
+  n_general: 5000
+  top_pct: 0.20
+  response_only: true
+
+attacks:
+  routehijack:
+    suffix_len: 20
+    n_steps: 300
+    lambda_suppress: 3.0
+    lambda_promote: 1.0
+    lambda_refusal: 1.0
+    promote_threshold: 0.3
+    refusal_window: 1
+
+eval:
+  asr:
+    judge_hf_id: cais/HarmBench-Llama-2-13b-cls
+    n_prompts: 100
+  mmlu:
+    n_questions: 500

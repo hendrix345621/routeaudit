@@ -82,6 +82,20 @@ make all
 
 Each phase reuses the prior phase's artifacts; the model is loaded once per phase.
 
+**One-shot run.** To pick a model and run all four phases end to end in a single
+command — the first thing it asks is *which model* (a preset nickname or any HF
+`user/model` id):
+
+```bash
+make run                 # interactive: choose the model, confirm, run
+make run MODEL=qwen3      # non-interactive (automation)
+python scripts/run_all.py --model microsoft/Phi-3.5-MoE-instruct --judge
+```
+
+`run_all.py` **ends at the SAFE/AT-RISK verdict and uploads nothing.** The deployable
+artifact of an attack is the **suffix text** itself (`artifacts/routehijack_universal.json`,
+also echoed by the eval) — RouteHijack is input-only and never produces or ships a model.
+
 ---
 
 ## Install
@@ -115,8 +129,19 @@ Two stages, matching how open-weight backbones get repackaged into deployed prod
 Everything is driven by [configs/base.yaml](configs/base.yaml):
 
 - **Swap the target model** under `model:` — any MoE whose router/experts the `ArchSpec` can
-  locate. Presets ship for **OLMoE**, **Mixtral**, and **Qwen** MoE; add a family by adding a
-  preset in [model/archspec.py](src/routehijack/model/archspec.py) and the dims in the config.
+  locate. Presets ship for **OLMoE**, **Mixtral**, **Qwen** MoE, and **Phi-MoE**; add a family by
+  adding a preset in [model/archspec.py](src/routehijack/model/archspec.py) and the dims in the
+  config. Passing a HuggingFace id straight to any script auto-detects the family and dims for
+  supported `model_type`s, or raises `UnsupportedModelError` with guidance.
+  - Ready-made config nicknames (`--config <name>` or `make run MODEL=<name>`): `olmoe`/`base`,
+    `mixtral`, `qwen2`, `qwen3` (Qwen3-30B-A3B), **`qwen3-235b`** (Qwen3-235B-A22B),
+    **`qwen3.6`** (Qwen3.6-35B-A3B — hybrid-attention MoE, dims verified from its config.json;
+    every layer still has a standard MoE gate so the attack applies), best-effort **`qwen3.5`**
+    ([config header](configs/qwen3_5_moe.yaml) checklist), and `smoke` (tiny end-to-end sanity run).
+    Passing a raw HF id auto-detects supported `model_type`s instead.
+  - **DeepSeek-V4 / mHC** is *not* supported by this pipeline — its grouped/biased top-k gate
+    can't be steered by the suffix attack. It lives as a separate experiment under
+    [mhc/](mhc/README.md) (routing diagnostic + a written explanation of why the attack fails).
 - **`use_chat_template`** renders prompts through the instruct template so the boundary token
   `t*` is the real decision point. Auto-falls back to raw text if the tokenizer has none.
 - **Attack budget** (`attacks.routehijack`): suffix length `T`, steps, the `λ` weights, the
@@ -134,7 +159,9 @@ Everything is driven by [configs/base.yaml](configs/base.yaml):
 | `artifacts/routehijack_universal.json` | routehijack | the optimized suffix |
 | `artifacts/routehijack_attacks.jsonl` | routehijack | per-prompt attacked completions |
 | `artifacts/routehijack_routing_shift.json` | routehijack | TESR / THPR routing-shift metrics |
-| `artifacts/eval_cells.jsonl` | eval | clean vs attacked ASR, MMLU, verdict |
+| `artifacts/eval_cells.jsonl` | eval | raw per-cell ASR / MMLU / routing-shift (for re-grading) |
+| `artifacts/eval_results.json` | eval | **consolidated results**: model, suffix, metrics, routing shift, verdict, timestamp |
+| `artifacts/eval_results.md` | eval | the same as a readable report (verdict, metrics table, the suffix) |
 | `artifacts/transcripts/*.md` | eval | readable sample conversations |
 
 **Metrics.** *ASR* — fraction of harmful prompts that get a non-refusal (string detector,
@@ -177,8 +204,15 @@ The pipeline is tuned to keep the GPU busy and avoid recomputation. Everything b
   any numeric mismatch or HF-version incompatibility, so it can never silently corrupt the attack.
 
 **Evaluation**
-- Completions are generated in **left-padded batches** (`--gen-batch-size`) via the model's own
-  `generate`, rather than decoding one prompt at a time.
+- **ASR completions** are generated in **left-padded batches** (`--gen-batch-size`) via the model's
+  own `generate`, rather than decoding one prompt at a time. The per-prompt step-by-step path is
+  kept only for cells that install router/expert *mutators* (RouteHijack's input-only cells have
+  none, so they batch); switching is automatic.
+- **MMLU** and the **routing-shift (TESR/THPR)** measurement run in **right-padded batches**
+  (`--gen-batch-size`, `--mmlu-batch-size`), reading each row's last real token / boundary token.
+  Right padding keeps real tokens at positions 0…L-1, so the batched results are numerically
+  identical to scoring one item at a time — just far fewer forward launches.
+- The **HarmBench judge** (`--judge`) already batches its classifier forwards.
 
 > The boundary token `t*` is placed correctly by rendering prompts through the chat template
 > (see *How it works*); this is a correctness requirement the optimizations are built on, not a
@@ -201,7 +235,14 @@ configs/      base.yaml
 
 ---
 
+## The attack artifact is the suffix
+
+RouteHijack is **input-only** — the pipeline produces a **text suffix** and a verdict, and never
+modifies weights. There is no model to "merge" or export: the deployable result is the suffix in
+`artifacts/routehijack_universal.json`, which the eval phase also prints and records into
+`artifacts/eval_cells.jsonl` alongside the ASR/MMLU/routing-shift numbers.
+
 ## Note on responsible use
 
 This is a red-teaming / safety-evaluation tool for measuring how susceptible open-weight MoE
-models are to routing-level manipulation. Use it to audit models you are authorized to test.
+models are to routing-level manipulation. Use it to audit models you are **authorized to test**.

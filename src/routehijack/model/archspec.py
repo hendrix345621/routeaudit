@@ -41,6 +41,19 @@ PRESETS: dict[str, dict] = {
         base_attr="model", layers_attr="layers", moe_block_attrs=("mlp",),
         router_attr="gate", experts_attr="experts", router_output="logits",
     ),
+    # Phi-3.5-MoE (`microsoft/Phi-3.5-MoE-instruct`, model_type `phimoe`):
+    # per-layer `.block_sparse_moe` is `PhiMoESparseMoeBlock` with `.gate`
+    # (plain nn.Linear → raw `(T, n_experts)` logits) and `.experts` (nn.ModuleList
+    # of `PhiMoEBlockSparseTop2MLP`). Structurally identical to Mixtral — the gate
+    # is a clean Linear, so router capture + mutation both work. VERIFIED layout.
+    "phimoe": dict(
+        base_attr="model", layers_attr="layers",
+        moe_block_attrs=("block_sparse_moe", "mlp"),
+        router_attr="gate", experts_attr="experts", router_output="logits",
+    ),
+    # NOTE: DeepSeekMoE (V2/V3/V4 + mHC) is intentionally NOT a main-project preset.
+    # Its gate is a grouped/biased non-differentiable top-k the suffix attack cannot
+    # steer; it is handled as a separate experiment under mhc/ (see mhc/README.md).
 }
 
 _FIELDS = ("base_attr", "layers_attr", "moe_block_attrs",

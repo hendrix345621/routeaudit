@@ -12,8 +12,16 @@ from typing import Iterable, Optional, Sequence
 
 from .. import ui
 from .asr import RefusalDetector, score_with_classifier
-from .generate import DefenseBundle, generate_with_defense
+from .generate import DefenseBundle, generate_batch, generate_with_defense
 from .mmlu import mmlu_logprob_accuracy
+
+
+def _has_mutators(defense: DefenseBundle) -> bool:
+    """True if the cell installs any router/expert/moe_out mutator — those require
+    the per-prompt step-by-step decode loop. RouteHijack is input-only (the attack
+    lives in the prompt text), so its cells have none and can use batched generation."""
+    return (defense.router_mutator is not None
+            or bool(defense.expert_mutators) or bool(defense.moe_out_mutators))
 
 
 @dataclass
@@ -45,28 +53,41 @@ def run_cell(
     n_show_live: int = 3,
     transcripts_dir: str = "artifacts/transcripts",
     spec=None,
+    want_template: bool = True,
+    gen_batch_size: int = 8,
+    mmlu_batch_size: int = 16,
     notes: Optional[dict] = None,
 ) -> CellResult:
     rd = RefusalDetector()
     log = ui.TranscriptLog(name, base_dir=transcripts_dir)
+    prompts = list(prompts)
     ui.section(f"cell = [bold]{name}[/bold]  (attack={attack_label or name}  n={len(prompts)})")
 
-    completions: list[str] = []
+    # Generate completions. Cells with mutators need the per-prompt step-by-step
+    # decode loop; mutator-free cells (RouteHijack: the attack is in the prompt text)
+    # use the batched, left-padded generator for far better GPU utilisation.
+    if _has_mutators(defense):
+        completions = [
+            generate_with_defense(model, tokenizer, p, defense=defense,
+                                  max_new_tokens=max_new_tokens, spec=spec,
+                                  want_template=want_template)
+            for p in ui.iter_with_progress(prompts, desc=name)
+        ]
+    else:
+        completions = generate_batch(
+            model, tokenizer, prompts, max_new_tokens=max_new_tokens,
+            batch_size=gen_batch_size, want_template=want_template, desc=name,
+        )
+
     examples: list[dict] = []
     n_refused = 0
-    shown = 0
-    for i, prompt in enumerate(ui.iter_with_progress(prompts, desc=name)):
-        completion = generate_with_defense(
-            model, tokenizer, prompt, defense=defense, max_new_tokens=max_new_tokens, spec=spec,
-        )
+    for i, (prompt, completion) in enumerate(zip(prompts, completions)):
         refused = rd.is_refusal(completion)
         n_refused += int(refused)
-        completions.append(completion)
         t = ui.Transcript(name, prompt, completion, refused, notes=notes or {})
         log.append(t)
-        if shown < n_show_live:
+        if i < n_show_live:
             ui.show_transcript(t)
-            shown += 1
         if i < n_keep_examples:
             examples.append({"prompt": prompt, "completion": completion, "refused": refused})
 
@@ -82,7 +103,8 @@ def run_cell(
     mmlu_acc = None
     if mmlu_questions is not None:
         ui.info("running MMLU subset (this cell)…")
-        mmlu_acc = mmlu_logprob_accuracy(model, tokenizer, mmlu_questions, defense=defense, spec=spec)
+        mmlu_acc = mmlu_logprob_accuracy(model, tokenizer, mmlu_questions, defense=defense,
+                                         spec=spec, batch_size=mmlu_batch_size)
 
     ui.kv_panel(name, {
         "ASR": asr,
