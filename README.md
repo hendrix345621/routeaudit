@@ -96,6 +96,20 @@ python scripts/run_all.py --model microsoft/Phi-3.5-MoE-instruct --judge
 artifact of an attack is the **suffix text** itself (`artifacts/routehijack_universal.json`,
 also echoed by the eval) — RouteHijack is input-only and never produces or ships a model.
 
+**Large models (Qwen3-235B and up), cost-effectively.** The gradient attack is the only phase
+that needs a big white-box node; harvest + eval are forward-only. So optimize the suffix on a
+cheap sibling, then measure on the big model in a **single load**:
+
+```bash
+make surrogate MODEL=qwen3          # cheap 1-GPU box → a transferable suffix
+make target MODEL=qwen3-235b        # big node: ONE load, forward-only harvest + eval + verdict
+```
+
+Everything is **spot-resumable** (`--resume` + checkpoints) and **bf16-only** (no quantization —
+it would corrupt the routing signal). Full white-box on 235B is available via
+`target_session.py --attack` (auto-scaled batches + grad checkpointing). See the **cost playbook**
+in [runbook.md](runbook.md) and [configs/qwen3_235b_a22b.yaml](configs/qwen3_235b_a22b.yaml).
+
 ---
 
 ## Install

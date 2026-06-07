@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Sequence
 
 import torch
@@ -73,6 +74,7 @@ class RouteHijackConfig:
                                           # runtime and auto-disabled on any HF-version/forward mismatch.
     early_stop_patience: int = 0          # 0 = disabled; N = stop after N steps with no `best` improvement
     checkpoint_path: str | None = None    # if set, dump best_suffix to this JSON file on every improvement
+    resume: bool = False                  # if True + checkpoint_path exists, warm-resume from it (spot-friendly)
     mode: str = "per_prompt"        # "per_prompt" | "universal"
     fixed_suffix: str | None = None
     seed: int = 0
@@ -319,6 +321,24 @@ class RouteHijackAttack:
         best_loss = float("inf")
         best_suffix = suffix_ids.clone()
 
+        # Warm-resume from a checkpoint (spot/preemption): seed the search position
+        # from the saved best suffix so the expensive progress isn't lost. RNG state
+        # is not restored, so this is a warm (not bit-exact) continuation.
+        start_step = 0
+        if self.cfg.resume and self.cfg.checkpoint_path and Path(self.cfg.checkpoint_path).exists():
+            import json as _json
+            ck = _json.loads(Path(self.cfg.checkpoint_path).read_text(encoding="utf-8"))
+            saved = ck.get("suffix_ids")
+            if saved and len(saved) == T_s:
+                suffix_ids = torch.tensor(saved, device=self.device, dtype=torch.long)
+                best_suffix = suffix_ids.clone()
+                best_loss = float(ck.get("best_loss", best_loss))
+                start_step = int(ck.get("step", 0)) + 1
+                ui.ok(f"resumed attack from {self.cfg.checkpoint_path} "
+                      f"(step {start_step}, best_loss {best_loss:.4f})")
+            else:
+                ui.warn(f"checkpoint {self.cfg.checkpoint_path} suffix len mismatch; starting fresh.")
+
         # Forward-pass budget hint so the user knows what to expect per step.
         subsample = self.cfg.candidate_prompt_subsample or 0
         eval_prompts_per_cand = (subsample if 0 < subsample < len(before_list)
@@ -350,7 +370,7 @@ class RouteHijackAttack:
             if self.cfg.use_prefix_cache:
                 self._build_prefix_cache(before_list)   # sets _prefix_cache_ok on success
             try:
-                for step in range(self.cfg.n_steps):
+                for step in range(start_step, self.cfg.n_steps):
                     loss, grad = self._batch_loss_and_grad(before_list, suffix_ids, emb_layer, V, need_grad=True)
                     improved = loss.item() < best_loss
                     if improved:

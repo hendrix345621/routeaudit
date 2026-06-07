@@ -153,7 +153,10 @@ def from_hf(model_id: str, *, template: str = "base",
 
 def _to_ns(obj: Any) -> Any:
     if isinstance(obj, dict):
-        return SimpleNamespace(**{k: _to_ns(v) for k, v in obj.items()})
+        # Coerce keys to str: YAML parses mapping keys like `0:` (e.g. a max_memory
+        # device map) as ints, which `SimpleNamespace(**...)` rejects. `_coerce_max_memory`
+        # in model/loader.py turns "0" back into a device int where needed.
+        return SimpleNamespace(**{str(k): _to_ns(v) for k, v in obj.items()})
     if isinstance(obj, list):
         return [_to_ns(v) for v in obj]
     return obj

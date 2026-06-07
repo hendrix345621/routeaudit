@@ -15,7 +15,7 @@
 
 model:
   hf_id: Qwen/Qwen3-235B-A22B
-  dtype: bfloat16
+  dtype: bfloat16            # bf16 ONLY — quantization would perturb the router logits
   device_map: auto
   n_layers: 94
   n_experts: 128
@@ -24,6 +24,36 @@ model:
   use_chat_template: true
   arch:
     name: qwen              # qwen2/3-MoE preset; see model/archspec.py
+
+  # ── Large-model fit/speed knobs (all bf16, quality-neutral) — see model/loader.py ──
+  load:
+    attn_implementation: sdpa      # or flash_attention_2 if installed (falls back if rejected)
+    # Pin per-GPU caps for predictable sharding on a multi-GPU node (keys = device index / "cpu").
+    # ~470 GB bf16 → leave headroom for activations + the attack's backward + batch-128 candidates.
+    max_memory:
+      "0": 78GiB
+      "1": 78GiB
+      "2": 78GiB
+      "3": 78GiB
+      "4": 78GiB
+      "5": 78GiB
+      "6": 78GiB
+      "7": 78GiB
+    # offload_folder: /persistent/offload   # forward-only phases can spill here; the ATTACK can't
+                                            # (autograd over offload is unusably slow) — run the
+                                            # attack on a surrogate instead. See COST PLAYBOOK below.
+
+# ── COST PLAYBOOK (Qwen3-235B on spot/rented; see runbook.md) ──────────────────
+# Cheapest correct path = don't run the gradient attack on 235B:
+#   1. On a cheap 1-GPU box, optimize the suffix on the closest sibling (Qwen3-30B-A3B):
+#        python scripts/run_all.py --model qwen3 --yes --stop-after attack \
+#            --checkpoint artifacts/attack.ckpt.json --resume
+#   2. On the big node, ONE model load does forward-only harvest + eval with that suffix:
+#        python scripts/target_session.py --model qwen3-235b \
+#            --suffix artifacts/routehijack_universal.json --judge --resume
+# Keep data/ + artifacts/ + HF_HOME on a PERSISTENT volume (NOT /dev/shm) so spot restarts
+# resume instead of recomputing/redownloading. surrogate: qwen3
+# ───────────────────────────────────────────────────────────────────────────────
 
 identify:
   pairs_path: ./data/llm_lat_pairs.jsonl

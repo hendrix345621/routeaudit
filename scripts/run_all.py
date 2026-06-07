@@ -73,6 +73,17 @@ def main() -> None:
     p.add_argument("--skip-data", action="store_true", help="reuse existing corpora (skip phase 1)")
     p.add_argument("--capture-only", action="store_true",
                    help="run data + harvest, then stop before the suffix attack/eval")
+    p.add_argument("--stop-after", choices=["data", "harvest", "attack", "eval"], default="eval",
+                   help="stop after this phase. Use 'attack' on a cheap SURROGATE box to produce a "
+                        "transferable suffix, then evaluate it on the big model with target_session.py.")
+    p.add_argument("--auto-batch", action="store_true", default=True,
+                   help="size attack batches to the model (avoids OOM on large models); on by default")
+    p.add_argument("--no-auto-batch", dest="auto_batch", action="store_false",
+                   help="disable auto-batch and use the manual attack batch flags")
+    p.add_argument("--checkpoint", default=None,
+                   help="attack suffix checkpoint path (spot-friendly; pairs with --resume)")
+    p.add_argument("--resume", action="store_true",
+                   help="resume harvest sweeps + attack from checkpoints")
     p.add_argument("--judge", action="store_true", help="re-grade eval ASR with HarmBench (phase 4)")
     args = p.parse_args()
 
@@ -81,12 +92,14 @@ def main() -> None:
     model = args.model or _pick_model_interactive()
     cfg, arch = _resolve_model(model)
 
+    stop_after = "harvest" if args.capture_only else args.stop_after
+
     md = cfg.model
     ui.kv_panel("Target", {
         "model": getattr(md, "hf_id", model), "arch": arch,
         "layers": getattr(md, "n_layers", "?"), "experts": getattr(md, "n_experts", "?"),
         "top_k": getattr(md, "top_k", "?"), "d_model": getattr(md, "d_model", "?"),
-        "mode": "capture-only" if args.capture_only else "full attack",
+        "stop after": stop_after, "auto-batch": args.auto_batch,
     })
 
     if not args.yes:
@@ -97,35 +110,47 @@ def main() -> None:
 
     # Phase 1 — data
     if not args.skip_data:
-        _run_phase("1/4 data", [PYTHON, "scripts/00_data.py", "--data-dir", args.data_dir])
+        _run_phase("data", [PYTHON, "scripts/00_data.py", "--data-dir", args.data_dir])
     else:
-        ui.info("skipping phase 1 (--skip-data); reusing existing corpora.")
+        ui.info("skipping data phase (--skip-data); reusing existing corpora.")
+    if stop_after == "data":
+        ui.print_done("stopped after data."); return
 
     # Phase 2 — harvest (expert localization)
-    _run_phase("2/4 harvest", [PYTHON, "scripts/01_harvest.py", "--config", model])
+    harvest_cmd = [PYTHON, "scripts/01_harvest.py", "--config", model]
+    if args.resume:
+        harvest_cmd.append("--resume")
+    _run_phase("harvest", harvest_cmd)
+    if stop_after == "harvest":
+        ui.print_done("stopped after harvest (safety/harmful experts written)."); return
 
-    if args.capture_only:
-        ui.print_done("capture-only run complete (harvest done; suffix attack skipped). "
-                      "See artifacts/safety_experts.json, harmful_experts.json")
+    # Phase 3 — routehijack (universal suffix attack)
+    attack_cmd = [PYTHON, "-u", "scripts/02_routehijack.py", "--config", model,
+                  "--n-steps", "300", "--candidates-per-step", "128",
+                  "--candidate-prompt-subsample", "0", "--early-stop-patience", "40"]
+    if args.auto_batch:
+        attack_cmd.append("--auto-batch")          # sizes batches + prefix-cache + grad-ckpt to the model
+    else:
+        attack_cmd += ["--n-prompts", "16", "--grad-batch-size", "8", "--candidate-batch-size", "128"]
+    if args.checkpoint:
+        attack_cmd += ["--checkpoint", args.checkpoint]
+    if args.resume:
+        attack_cmd.append("--resume")
+    _run_phase("routehijack (attack)", attack_cmd)
+    if stop_after == "attack":
+        ui.print_done("stopped after attack — suffix at artifacts/routehijack_universal.json. "
+                      "Transfer it to a big model with: python scripts/target_session.py "
+                      "--model <target> --suffix artifacts/routehijack_universal.json")
         return
-
-    # Phase 3 — routehijack (universal suffix attack); flags mirror the Makefile.
-    _run_phase("3/4 routehijack", [
-        PYTHON, "-u", "scripts/02_routehijack.py", "--config", model,
-        "--n-prompts", "16", "--n-steps", "300", "--candidates-per-step", "128",
-        "--candidate-prompt-subsample", "0", "--grad-batch-size", "8",
-        "--candidate-batch-size", "128", "--early-stop-patience", "40",
-    ])
 
     # Phase 4 — eval (ASR + MMLU + routing shift + verdict)
     eval_cmd = [PYTHON, "scripts/03_eval.py", "--config", model]
     if args.judge:
         eval_cmd.append("--judge")
-    _run_phase("4/4 eval", eval_cmd)
+    _run_phase("eval", eval_cmd)
 
-    ui.print_done("End-to-end run complete — see artifacts/eval_cells.jsonl for the "
-                  "SAFE/AT-RISK verdict + the deployable suffix, and artifacts/transcripts/ "
-                  "for samples.")
+    ui.print_done("End-to-end run complete — see artifacts/eval_results.md for the verdict + "
+                  "suffix, and artifacts/transcripts/ for samples.")
 
 
 if __name__ == "__main__":

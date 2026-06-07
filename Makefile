@@ -35,7 +35,19 @@ all: data harvest routehijack eval
 run:
 	$(PY) scripts/run_all.py $(if $(MODEL),--model $(MODEL) --yes,)
 
-.PHONY: install data harvest routehijack eval all run clean
+# Cost-effective large-model flow (e.g. Qwen3-235B). See the COST PLAYBOOK in
+# configs/qwen3_235b_a22b.yaml + runbook.md.
+#   make surrogate MODEL=qwen3            # cheap box: produce a transferable suffix
+#   make target MODEL=qwen3-235b          # big node: ONE load, forward-only harvest+eval
+surrogate:
+	$(PY) scripts/run_all.py --model $(MODEL) --yes --stop-after attack \
+		--checkpoint $(ART)/attack.ckpt.json --resume
+
+target:
+	$(PY) scripts/target_session.py --model $(MODEL) \
+		--suffix $(ART)/routehijack_universal.json --judge --resume
+
+.PHONY: install data harvest routehijack eval all run surrogate target clean
 
 clean:
 	rm -rf $(ART)
