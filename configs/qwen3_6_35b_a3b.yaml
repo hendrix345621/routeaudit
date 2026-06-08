@@ -32,6 +32,10 @@ model:
   top_k: 8
   d_model: 2048
   use_chat_template: true
+  enable_thinking: false    # REASONING model — turn OFF chain-of-thought so the boundary
+                            # token t* is the real answer decision (not "Here's a thinking
+                            # process:"). Required for correct localization + ASR scoring;
+                            # falls back to /no_think if this template ignores the kwarg.
   arch:
     name: qwen              # standard Qwen MoE gate; see notes above
 

@@ -158,9 +158,40 @@ Everything is driven by [configs/base.yaml](configs/base.yaml):
     [mhc/](mhc/README.md) (routing diagnostic + a written explanation of why the attack fails).
 - **`use_chat_template`** renders prompts through the instruct template so the boundary token
   `t*` is the real decision point. Auto-falls back to raw text if the tokenizer has none.
+- **`enable_thinking`** (reasoning models — see the caveat below). Set `false` on Qwen3-family
+  configs; forwarded to the chat template so the model answers directly.
 - **Attack budget** (`attacks.routehijack`): suffix length `T`, steps, the `λ` weights, the
   harmful-promotion margin. CLI flags on `scripts/02_routehijack.py` tune the search
   (candidates per step, prompt subsample, grad/candidate batch sizes, early-stop patience).
+
+### ⚠ Caveat — reasoning ("thinking") models
+
+RouteHijack assumes the **first generated token (`t*`) is the safety decision point** — that's
+where it localizes safety experts, applies `L_refusal`, and measures routing shift. **Reasoning
+models break that assumption:** with chain-of-thought on, `t*` is the start of the *thinking*
+("Here's a thinking process: …"), and the model only decides to refuse/comply *much later*, after
+the `</think>`. Left on, this silently corrupts the whole pipeline — expert localization counts
+thinking tokens, the attack aims at the wrong token, and the refusal detector scores the thinking
+preamble (a truncated CoT looks like a "compliance"), inflating ASR.
+
+So the shipped Qwen3-family configs set **`enable_thinking: false`**, which makes `t*` the real
+answer decision and the metrics trustworthy. **This means RouteHijack evaluates a reasoning model's
+*non-thinking* mode** — a deliberate scoping choice (the only setting consistent with the boundary-
+token threat model), **not** a measurement of its full reasoning-mode safety. After a run on a new
+reasoning model, sanity-check that completions no longer open with a thinking preamble (some custom
+`trust_remote_code` templates ignore the kwarg and need the `/no_think` switch instead).
+
+**Adapting to thinking mode** is a real research extension (sketched below), not a config flag:
+
+1. **Re-anchor `t*` to the answer start** (post-`</think>`), not the first generated token — the
+   safety decision in a reasoning model lives at the answer onset, deep in the generation.
+2. **Localize on answer tokens**, masking the chain-of-thought, so harvest flags the experts that
+   fire when the *answer* refuses vs complies (the response-driven idea, with "response" = answer).
+3. **Make it tractable** — the cheap path freezes one clean thinking prefix and optimizes the suffix
+   to flip routing at the answer onset given that prefix (no per-candidate rollout); the faithful
+   path rolls out thinking per step (far more expensive). A genuinely open question is whether
+   reasoning models are *more robust* to routing attacks because safety is deliberated over many
+   tokens rather than snap-decided at `t*` — itself a worthwhile alignment result.
 
 ---
 

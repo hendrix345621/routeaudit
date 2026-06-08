@@ -27,15 +27,38 @@ def use_template(tokenizer, want: bool) -> bool:
     return bool(want) and has_chat_template(tokenizer)
 
 
+# Extra kwargs forwarded to `apply_chat_template` for every render in this process.
+# Set once (e.g. by the loader from `model.enable_thinking`). The key use is
+# {'enable_thinking': False} on REASONING models (Qwen3 family): with thinking on,
+# the boundary token t* is the start of a chain-of-thought, not the answer — which
+# breaks expert localization, the L_refusal term, AND the refusal detector (it scores
+# the thinking preamble, not the answer). Turning thinking off makes t* the real
+# answer-decision token the attack/metrics assume.
+_CHAT_TEMPLATE_KWARGS: dict = {}
+_CHAT_KW_OK = True
+
+
+def set_chat_template_kwargs(kw: dict | None) -> None:
+    global _CHAT_KW_OK
+    _CHAT_TEMPLATE_KWARGS.clear()
+    _CHAT_TEMPLATE_KWARGS.update(kw or {})
+    _CHAT_KW_OK = True
+
+
 def render_user_turn(tokenizer, content: str, *, want_template: bool = True) -> str:
     """Render a single user turn as the string actually fed to the model, with the
     assistant generation prompt appended. Raw `content` if no template."""
-    if use_template(tokenizer, want_template):
-        return tokenizer.apply_chat_template(
-            [{"role": "user", "content": content}],
-            tokenize=False, add_generation_prompt=True,
-        )
-    return content
+    if not use_template(tokenizer, want_template):
+        return content
+    global _CHAT_KW_OK
+    msgs = [{"role": "user", "content": content}]
+    if _CHAT_TEMPLATE_KWARGS and _CHAT_KW_OK:
+        try:
+            return tokenizer.apply_chat_template(
+                msgs, tokenize=False, add_generation_prompt=True, **_CHAT_TEMPLATE_KWARGS)
+        except TypeError:
+            _CHAT_KW_OK = False   # this template rejects the kwargs; fall back (once)
+    return tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
 
 
 def encode_prompt(tokenizer, content: str, *, want_template: bool = True,

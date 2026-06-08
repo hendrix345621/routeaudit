@@ -36,6 +36,7 @@ model:
   top_k: 8                              # routed experts per token  ⚠ verify
   d_model: 0                            # ⚠ FILL from config.json (hidden_size) — or auto-detect via HF id
   use_chat_template: true
+  enable_thinking: false                # reasoning model — turn OFF thinking so t* is the answer decision
   arch:
     name: qwen                          # standard Linear gate assumed; see notes above
 

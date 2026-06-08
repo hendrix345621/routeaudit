@@ -75,8 +75,28 @@ def load_model(cfg) -> LoadedModel:
 
     model.eval()
     _report_placement(model)
+
+    # Honor chat-template options (e.g. enable_thinking: false on Qwen3 reasoning
+    # models) across every phase that renders prompts.
+    from . import prompting
+    prompting.set_chat_template_kwargs(_chat_template_kwargs(cfg.model))
+
     return LoadedModel(model=model, tokenizer=tok, cfg=cfg.model,
                        spec=ArchSpec.from_config(cfg.model))
+
+
+def _chat_template_kwargs(model_ns) -> dict:
+    """Map `model.*` config into apply_chat_template kwargs. `enable_thinking: false`
+    turns off a reasoning model's chain-of-thought; `chat_template_kwargs:` (a block)
+    is a generic passthrough for anything else a template supports."""
+    kw: dict = {}
+    et = getattr(model_ns, "enable_thinking", None)
+    if et is not None:
+        kw["enable_thinking"] = bool(et)
+    extra = getattr(model_ns, "chat_template_kwargs", None)
+    if extra is not None:
+        kw.update(vars(extra) if isinstance(extra, SimpleNamespace) else dict(extra))
+    return kw
 
 
 def enable_grad_checkpointing(model) -> bool:

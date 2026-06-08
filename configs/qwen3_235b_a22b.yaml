@@ -22,6 +22,8 @@ model:
   top_k: 8
   d_model: 4096
   use_chat_template: true
+  enable_thinking: false    # Qwen3 is a reasoning model — turn OFF thinking so the boundary
+                            # token t* is the answer decision (correct localization + ASR).
   arch:
     name: qwen              # qwen2/3-MoE preset; see model/archspec.py
 
