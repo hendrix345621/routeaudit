@@ -75,6 +75,9 @@ class RouteHijackConfig:
     early_stop_patience: int = 0          # 0 = disabled; N = stop after N steps with no `best` improvement
     checkpoint_path: str | None = None    # if set, dump best_suffix to this JSON file on every improvement
     resume: bool = False                  # if True + checkpoint_path exists, warm-resume from it (spot-friendly)
+    ascii_only: bool = False              # restrict suffix tokens to ASCII so the search can't inject a
+                                          # foreign-language instruction (e.g. a Chinese "write a poem"
+                                          # redirect that dodges refusal without eliciting the harm)
     mode: str = "per_prompt"        # "per_prompt" | "universal"
     fixed_suffix: str | None = None
     seed: int = 0
@@ -383,6 +386,11 @@ class RouteHijackAttack:
                     else:
                         steps_since_improve += 1
 
+                    if self.cfg.ascii_only:
+                        # Exclude non-ASCII tokens from the candidate set so the search
+                        # can't inject a coherent foreign-language instruction. Set their
+                        # grad to +inf → they never enter top-k of (-grad). Built once.
+                        grad = grad.masked_fill(self._ascii_disallowed(V).to(grad.device), float("inf"))
                     top_tokens = (-grad).topk(self.cfg.top_k_replacements, dim=-1).indices  # (T_s, K)
 
                     def _make_trial():
@@ -431,6 +439,20 @@ class RouteHijackAttack:
                 self._prefix_cache_ok = False
 
         return best_suffix
+
+    def _ascii_disallowed(self, V: int) -> torch.Tensor:
+        """(V,) bool mask, True where a token decodes to anything non-ASCII — built
+        once and cached. Used to keep the suffix Latin/ASCII so the search can't form
+        a foreign-language instruction that redirects the model instead of jailbreaking."""
+        cached = getattr(self, "_ascii_mask", None)
+        if cached is not None and cached.shape[0] == V:
+            return cached
+        # One batched decode of every single-token id (handles byte-BPE correctly).
+        strs = self.tokenizer.batch_decode([[i] for i in range(V)])
+        bad = torch.tensor([(not s) or (not s.isascii()) for s in strs], dtype=torch.bool)
+        self._ascii_mask = bad
+        ui.info(f"ascii-only suffix: {int((~bad).sum())}/{V} tokens allowed")
+        return bad
 
     def _roundtrips(self, suffix_ids: torch.Tensor, T_s: int) -> bool:
         """Algorithm 1 constraint: keep a candidate only if its decoded string

@@ -43,6 +43,9 @@ def main():
                         "Overrides the manual batch flags.")
     p.add_argument("--grad-checkpointing", action="store_true",
                    help="checkpoint the backward pass (trades compute for memory; quality-neutral)")
+    p.add_argument("--ascii-suffix", action="store_true",
+                   help="restrict the suffix to ASCII tokens so the search can't inject a "
+                        "foreign-language instruction (recommended on multilingual models)")
     p.add_argument("--checkpoint", default=None,
                    help="JSON path to dump the best suffix on every improvement (spot-friendly)")
     p.add_argument("--resume", action="store_true",
