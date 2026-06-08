@@ -4,7 +4,7 @@
 
 ```bash
 cd /workspace
-git clone <repo-url> && cd routehijack
+git clone https://github.com/hendrix345621/routehijack && cd routehijack
 
 source ./setup_ram.sh        # run everything in RAM (disk too small); see notes below
 pip install -e .
