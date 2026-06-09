@@ -84,7 +84,10 @@ def main() -> None:
                    help="attack suffix checkpoint path (spot-friendly; pairs with --resume)")
     p.add_argument("--resume", action="store_true",
                    help="resume harvest sweeps + attack from checkpoints")
-    p.add_argument("--judge", action="store_true", help="re-grade eval ASR with HarmBench (phase 4)")
+    p.add_argument("--judge", action="store_true", default=True,
+                   help="grade eval ASR with the config's judge (default Llama-Guard-3-1B); on by default")
+    p.add_argument("--no-judge", dest="judge", action="store_false",
+                   help="skip the judge and report the (string-detector) ASR only")
     args = p.parse_args()
 
     ui.big_banner("RouteHijack — end-to-end run")
@@ -127,7 +130,7 @@ def main() -> None:
     # Phase 3 — routehijack (universal suffix attack)
     attack_cmd = [PYTHON, "-u", "scripts/02_routehijack.py", "--config", model,
                   "--n-steps", "300", "--candidates-per-step", "128",
-                  "--candidate-prompt-subsample", "0", "--early-stop-patience", "40"]
+                  "--candidate-prompt-subsample", "0", "--early-stop-patience", "30"]
     if args.auto_batch:
         attack_cmd.append("--auto-batch")          # sizes batches + prefix-cache + grad-ckpt to the model
     else:
@@ -144,13 +147,12 @@ def main() -> None:
         return
 
     # Phase 4 — eval (ASR + MMLU + routing shift + verdict)
-    eval_cmd = [PYTHON, "scripts/03_eval.py", "--config", model]
-    if args.judge:
-        eval_cmd.append("--judge")
+    eval_cmd = [PYTHON, "scripts/03_eval.py", "--config", model,
+                "--judge" if args.judge else "--no-judge"]
     _run_phase("eval", eval_cmd)
 
-    ui.print_done("End-to-end run complete — see artifacts/eval_results.md for the verdict + "
-                  "suffix, and artifacts/transcripts/ for samples.")
+    ui.print_done("End-to-end run complete — see artifacts/results/ for the full bundle "
+                  "(summary.md · per_prompt.md with every prompt's clean vs attacked + verdict).")
 
 
 if __name__ == "__main__":

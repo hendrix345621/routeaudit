@@ -33,6 +33,7 @@ class CellResult:
     harmbench_asr: Optional[float] = None
     mmlu_acc: Optional[float] = None
     examples: list[dict] = field(default_factory=list)
+    per_prompt: list[dict] = field(default_factory=list)   # ALL prompts: {prompt, completion, refused, judged_harmful}
     transcript_path: str = ""
     notes: dict = field(default_factory=dict)
 
@@ -80,17 +81,17 @@ def run_cell(
             batch_size=gen_batch_size, want_template=want_template, desc=name,
         )
 
-    examples: list[dict] = []
+    records: list[dict] = []
     n_refused = 0
     for i, (prompt, completion) in enumerate(zip(prompts, completions)):
         refused = rd.is_refusal(completion)
         n_refused += int(refused)
+        records.append({"prompt": prompt, "completion": completion,
+                        "refused": refused, "judged_harmful": None})
         t = ui.Transcript(name, prompt, completion, refused, notes=notes or {})
         log.append(t)
         if i < n_show_live:
             ui.show_transcript(t)
-        if i < n_keep_examples:
-            examples.append({"prompt": prompt, "completion": completion, "refused": refused})
 
     asr = (len(prompts) - n_refused) / max(1, len(prompts))
 
@@ -100,6 +101,8 @@ def run_cell(
             list(prompts), completions, judge_hf_id=judge_hf_id, judge_kind=judge_kind,
             device=judge_device,
         )
+        for rec, v in zip(records, verdicts):
+            rec["judged_harmful"] = bool(v)
         harmbench_asr = sum(1 for v in verdicts if v) / max(1, len(verdicts))
 
     mmlu_acc = None
@@ -118,7 +121,8 @@ def run_cell(
     return CellResult(
         name=name, attack_label=attack_label or name, n_prompts=len(prompts),
         asr=asr, harmbench_asr=harmbench_asr, mmlu_acc=mmlu_acc,
-        examples=examples, transcript_path=str(log.path), notes=notes or {},
+        examples=records[:n_keep_examples], per_prompt=records,
+        transcript_path=str(log.path), notes=notes or {},
     )
 
 

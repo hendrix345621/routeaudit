@@ -39,7 +39,13 @@ attacks:
 
 eval:
   asr:
-    judge_hf_id: cais/HarmBench-Llama-2-13b-cls   # optional HarmBench grader (--judge)
+    # Default judge: Llama-Guard-3-1B — fast (~2.5 GB) + language-agnostic, so it scores
+    # non-English (e.g. Chinese) refusals correctly where the string detector can't.
+    # Gated on HF (accept the license + `hf auth login`). Swap to HarmBench-13B for the
+    # behaviour-conditioned AdvBench number: judge_hf_id: cais/HarmBench-Llama-2-13b-cls,
+    # judge_kind: harmbench.
+    judge_hf_id: meta-llama/Llama-Guard-3-1B
+    judge_kind: llamaguard
     n_prompts: 100
   mmlu:
     n_questions: 500

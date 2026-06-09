@@ -22,7 +22,7 @@ routehijack:
 	$(PY) -u scripts/02_routehijack.py --config $(CONFIG) \
 		--n-prompts 16 --n-steps 300 --candidates-per-step 128 \
 		--candidate-prompt-subsample 0 --grad-batch-size 8 --candidate-batch-size 128 \
-		--early-stop-patience 40
+		--early-stop-patience 30
 
 eval:
 	$(PY) scripts/03_eval.py --config $(CONFIG)

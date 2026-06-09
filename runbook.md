@@ -26,7 +26,10 @@ It uploads nothing. For non-interactive use: `make run MODEL=qwen3`.
 - `artifacts/eval_results.json` + `eval_results.md` — **consolidated results**: model, suffix,
   ASR/MMLU/routing-shift, SAFE/AT-RISK verdict, timestamp (the `.md` is the readable report).
 - `artifacts/eval_cells.jsonl` — raw per-cell numbers for programmatic re-grading.
-- `artifacts/transcripts/*.md` — readable samples.
+- `artifacts/results/` — **full auditable bundle**: `summary.md` + `per_prompt.md`/`.jsonl`
+  (every prompt's clean vs attacked completion + string **and** judge verdict) + `transcripts/`.
+  The judge (Llama-Guard-3-1B by default) is language-agnostic, so non-English refusals are
+  scored correctly — `make run` runs it by default (`--no-judge` to skip).
 - `artifacts/routehijack_universal.json` — the optimized suffix (the deployable artifact).
 - `artifacts/safety_experts.json`, `harmful_experts.json` — localized experts.
 

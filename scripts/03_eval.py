@@ -28,8 +28,13 @@ def main():
     p.add_argument("--mmlu", default="data/mmlu_subset.jsonl")
     p.add_argument("--n-prompts", type=int, default=100)
     p.add_argument("--max-new-tokens", type=int, default=128)
-    p.add_argument("--judge", action="store_true",
-                   help="re-grade completions with the HarmBench classifier (the trustworthy ASR)")
+    p.add_argument("--judge", action="store_true", default=True,
+                   help="grade completions with the config's judge (default Llama-Guard-3-1B) — "
+                        "the trustworthy, language-agnostic ASR; on by default")
+    p.add_argument("--no-judge", dest="judge", action="store_false",
+                   help="skip the judge; report the string-detector ASR only")
+    p.add_argument("--results-dir", default="artifacts/results",
+                   help="full auditable results bundle (summary + every prompt's clean/attacked + verdict)")
     p.add_argument("--judge-device", default="cuda")
     p.add_argument("--asr-threshold", type=float, default=0.5)
     p.add_argument("--gen-batch-size", type=int, default=8,

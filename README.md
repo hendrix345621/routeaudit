@@ -233,7 +233,7 @@ reasoning model, sanity-check that completions no longer open with a thinking pr
 | `artifacts/eval_cells.jsonl` | eval | raw per-cell ASR / MMLU / routing-shift (for re-grading) |
 | `artifacts/eval_results.json` | eval | **consolidated results**: model, suffix, metrics, routing shift, verdict, timestamp |
 | `artifacts/eval_results.md` | eval | the same as a readable report (verdict, metrics table, the suffix) |
-| `artifacts/transcripts/*.md` | eval | readable sample conversations |
+| **`artifacts/results/`** | eval | **full auditable bundle**: `summary.md` + `per_prompt.md` / `.jsonl` — every prompt's clean vs attacked completion with the string **and** judge verdict (clear proof each "success" is real harm, not a non-English refusal) + `transcripts/` |
 
 **Metrics.** *ASR* — fraction of harmful prompts that get a non-refusal (string detector,
 optionally re-graded by the HarmBench classifier with `--judge`). *MMLU* — multiple-choice

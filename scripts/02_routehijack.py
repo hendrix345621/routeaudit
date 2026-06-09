@@ -32,7 +32,7 @@ def main():
                    help="candidates scored per forward (0 = all at once); lower if the KV/activations OOM")
     p.add_argument("--grad-batch-size", type=int, default=8,
                    help="prompts per batched forward+backward in the grad pass; lower if VRAM-tight")
-    p.add_argument("--early-stop-patience", type=int, default=40)
+    p.add_argument("--early-stop-patience", type=int, default=30)
     p.add_argument("--prefix-kv-cache", action="store_true",
                    help="EXPERIMENTAL: KV-cache the fixed [before] prefix so candidate forwards "
                         "process only [suffix][after]. Quality-neutral; self-checks against the "

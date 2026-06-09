@@ -53,7 +53,9 @@ def main() -> None:
                    help="resume harvest sweeps + (with --attack) the attack checkpoint")
     p.add_argument("--checkpoint", default="artifacts/attack.ckpt.json",
                    help="attack suffix checkpoint path (spot-friendly; used with --attack)")
-    p.add_argument("--judge", action="store_true", help="re-grade eval ASR with HarmBench")
+    p.add_argument("--judge", action="store_true", default=True,
+                   help="grade eval ASR with the config's judge (default Llama-Guard-3-1B); on by default")
+    p.add_argument("--no-judge", dest="judge", action="store_false", help="skip the judge")
     p.add_argument("--n-prompts", type=int, default=100, help="eval prompt count")
     p.add_argument("--attack-n-prompts", type=int, default=16, help="attack universal-batch size")
     p.add_argument("--n-steps", type=int, default=300, help="attack steps")
@@ -85,7 +87,7 @@ def main() -> None:
             shift_out="artifacts/routehijack_routing_shift.json",
             n_prompts=args.attack_n_prompts, n_steps=args.n_steps,
             candidates_per_step=128, candidate_prompt_subsample=0,
-            early_stop_patience=40, auto_batch=True, grad_checkpointing=True,
+            early_stop_patience=30, auto_batch=True, grad_checkpointing=True,
             prefix_kv_cache=True, checkpoint=args.checkpoint, resume=args.resume,
             gen_batch_size=args.gen_batch_size, max_new_tokens=128, show_samples=3))
         suffix_path = res["suffix_path"]
