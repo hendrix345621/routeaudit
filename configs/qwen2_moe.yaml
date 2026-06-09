@@ -33,11 +33,14 @@ attacks:
     lambda_refusal: 1.0
     promote_threshold: 0.3
     refusal_window: 1
-    ascii_only: true        # multilingual model — keep the suffix ASCII (no foreign-language injection)
+    lambda_target: 1.0      # affirmative-target (#1) anchors on-topic — see configs/base.yaml
+    target_len: 16
+    ascii_only: false       # OFF: target term prevents the foreign-language redirect; keep multilingual
 
 eval:
   asr:
-    judge_hf_id: cais/HarmBench-Llama-2-13b-cls
+    judge_hf_id: meta-llama/Llama-Guard-3-1B   # fast taxonomy judge; gated (accept license + hf auth)
+    judge_kind: llamaguard
     n_prompts: 100
   mmlu:
     n_questions: 500

@@ -115,14 +115,18 @@ def attack_run(loaded, cfg, args) -> dict:
                 f"cand={candidate_batch_size} grad={grad_batch_size} n_prompts={n_prompts} "
                 f"prefix_cache={use_prefix_cache} grad_ckpt={grad_ckpt}")
 
-    prompts = [r["prompt"] for r in list(read_jsonl(_g(args, "advbench", "data/advbench.jsonl")))[:n_prompts]]
+    rows_in = list(read_jsonl(_g(args, "advbench", "data/advbench.jsonl")))[:n_prompts]
+    prompts = [r["prompt"] for r in rows_in]
+    targets = [r.get("target", "") for r in rows_in]   # affirmative openers for the #1 term
     use_tmpl = getattr(cfg.model, "use_chat_template", True)
 
+    lambda_target = float(getattr(rh, "lambda_target", 0.0))
     attack_cfg = RouteHijackConfig(
         safety_experts=safety, harmful_experts=harmful,
         suffix_len=rh.suffix_len, n_steps=_g(args, "n_steps", 300),
         lambda_suppress=rh.lambda_suppress, lambda_promote=rh.lambda_promote,
         lambda_refusal=rh.lambda_refusal, promote_threshold=rh.promote_threshold,
+        lambda_target=lambda_target, target_len=int(getattr(rh, "target_len", 16)),
         refusal_window=rh.refusal_window, n_candidates_per_step=_g(args, "candidates_per_step", 128),
         candidate_prompt_subsample=_g(args, "candidate_prompt_subsample", 0),
         candidate_batch_size=candidate_batch_size, grad_batch_size=grad_batch_size,
@@ -135,7 +139,7 @@ def attack_run(loaded, cfg, args) -> dict:
     ckpt_on = grad_ckpt and enable_grad_checkpointing(model)
     try:
         attacker = RouteHijackAttack(attack_cfg, model, tok, spec=spec)
-        suffix = attacker.optimize_universal_suffix(prompts)
+        suffix = attacker.optimize_universal_suffix(prompts, targets=targets if lambda_target > 0 else None)
     finally:
         if ckpt_on:
             disable_grad_checkpointing(model)   # restore KV cache for generation
@@ -203,6 +207,7 @@ def eval_run(loaded, cfg, args) -> dict:
     attacked = apply_routehijack_suffix(prompts, suffix)
 
     common = dict(judge=bool(_g(args, "judge", False)), judge_hf_id=cfg.eval.asr.judge_hf_id,
+                  judge_kind=getattr(cfg.eval.asr, "judge_kind", "harmbench"),
                   judge_device=_g(args, "judge_device", "cuda"),
                   max_new_tokens=_g(args, "max_new_tokens", 128), spec=spec,
                   want_template=use_tmpl, gen_batch_size=_g(args, "gen_batch_size", 8),

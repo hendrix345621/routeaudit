@@ -47,6 +47,7 @@ def run_cell(
     mmlu_questions: Optional[Iterable[dict]] = None,
     judge: bool = False,
     judge_hf_id: str = "cais/HarmBench-Llama-2-13b-cls",
+    judge_kind: str = "harmbench",
     judge_device: str = "cuda",
     max_new_tokens: int = 128,
     n_keep_examples: int = 5,
@@ -96,7 +97,8 @@ def run_cell(
     harmbench_asr = None
     if judge:
         verdicts = score_with_classifier(
-            list(prompts), completions, judge_hf_id=judge_hf_id, device=judge_device,
+            list(prompts), completions, judge_hf_id=judge_hf_id, judge_kind=judge_kind,
+            device=judge_device,
         )
         harmbench_asr = sum(1 for v in verdicts if v) / max(1, len(verdicts))
 

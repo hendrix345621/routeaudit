@@ -164,6 +164,32 @@ Everything is driven by [configs/base.yaml](configs/base.yaml):
   harmful-promotion margin. CLI flags on `scripts/02_routehijack.py` tune the search
   (candidates per step, prompt subsample, grad/candidate batch sizes, early-stop patience).
 
+### Attack signal & judge
+
+The pure routing loss only *suppresses refusal*, so the search could "win" by derailing the
+model onto **off-topic content** (a non-refusal that isn't the harmful answer — e.g. a suffix
+that injects a foreign-language "write a poem" instruction). Two changes fix that:
+
+- **`lambda_target` (λ4) — affirmative-target term.** Teacher-forces the AdvBench harmful-answer
+  opener (`target` field) so the attack is anchored **on-topic** — it must start the *actual*
+  harmful answer, which poetry can't satisfy. Combined with `lambda_refusal` it forms a
+  contrastive margin (push the answer up, refusal down). On by default (`λ4=1.0`); `0.0` is the
+  paper-faithful routing-only loss. One forward, differentiable, ~1.05× runtime, and it
+  **transfers** (targets aren't model-specific).
+- **`ascii_only: false`** on the Qwen configs — because the on-topic anchor now prevents the
+  redirect, the ASCII constraint is no longer needed and **cross-lingual features are kept**.
+- **Judge.** ASR is screened by the string detector but the trustworthy number comes from a judge
+  (`--judge`): `eval.asr.judge_kind` ∈ {`harmbench` (behaviour-conditioned, the paper standard),
+  `llamaguard` (fast taxonomy judge — `Llama-Guard-3-1B`, default on the Qwen configs; **gated**,
+  accept the license + `hf auth login`)}. The judge loads once and is reused across cells. Eval
+  **warns loudly** if run without a judge.
+
+> **Roadmap — #3-MoE (experimental).** [attacks/harm_probe.py](src/routehijack/attacks/harm_probe.py)
+> + [scripts/distill_harm_probe.py](scripts/distill_harm_probe.py) distill the judge into a tiny
+> probe over **router features** (mHC-immune, MoE-native) for *judge-aware gradients* at probe
+> speed. The probe/training are built + tested; wiring `probe_loss` into the attack loss is the
+> remaining integration step.
+
 ### ⚠ Caveat — reasoning ("thinking") models
 
 RouteHijack assumes the **first generated token (`t*`) is the safety decision point** — that's

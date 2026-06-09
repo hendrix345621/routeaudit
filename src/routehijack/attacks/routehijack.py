@@ -56,6 +56,13 @@ class RouteHijackConfig:
     lambda_suppress: float = 3.0
     lambda_promote: float = 1.0
     lambda_refusal: float = 1.0
+    lambda_target: float = 0.0            # affirmative-target term (#1): teacher-forced NLL of the
+                                          # AdvBench harmful answer opener ("Sure, here is …"). 0 = off
+                                          # (paper-faithful). >0 anchors the attack ON-TOPIC so it
+                                          # elicits the harmful answer instead of dodging refusal with
+                                          # off-topic text — and with refusal-unlikelihood it forms the
+                                          # contrastive margin (#5: push answer up, refusal down).
+    target_len: int = 16                  # target tokens teacher-forced for the affirmative term
     promote_threshold: float = 0.3
     # Eq. 8 penalizes refusal tokens over the first W decoding steps. We score the
     # window of `refusal_window` positions ENDING at the boundary token. With the
@@ -206,6 +213,52 @@ def _loss_promote_bi(router_logits, harmful, boundary_idx, threshold) -> torch.T
     return torch.stack(losses, 0).mean(0)
 
 
+def _loss_target_bi(logits, target_ids, target_mask, boundary_idx) -> torch.Tensor:
+    """Affirmative-target NLL (#1), per sequence in a right-padded batch.
+
+    Teacher-forced: the sequence is [..before..][suffix][after][target], so the logit
+    at `boundary+k` predicts `target[k]`. Returns mean -log P(target_k) over the
+    (masked) target span — minimizing it makes the model START the on-topic harmful
+    answer. `target_ids`/`target_mask`: (B, m); `boundary_idx`: (B,)."""
+    B, T, V = logits.shape
+    m = target_ids.shape[1]
+    ar = torch.arange(B, device=logits.device)
+    offsets = torch.arange(m, device=logits.device)                       # predict target[0..m-1]
+    pos = (boundary_idx[:, None] + offsets[None, :]).clamp_max(T - 1)      # (B, m)
+    gathered = logits[ar[:, None], pos]                                    # (B, m, V)
+    logp = gathered.log_softmax(-1)
+    tok_logp = logp.gather(-1, target_ids[:, :, None].clamp_max(V - 1)).squeeze(-1)  # (B, m)
+    denom = target_mask.sum(-1).clamp_min(1.0)
+    return -(tok_logp * target_mask).sum(-1) / denom                      # (B,)
+
+
+def _loss_target_b(logits, target_ids, target_mask, boundary: int) -> torch.Tensor:
+    """Affirmative-target NLL (#1) for a candidate batch that shares ONE prompt → a
+    uniform scalar `boundary` and a single (m,) target broadcast over B."""
+    B, T, V = logits.shape
+    m = target_ids.shape[0]
+    pos = (boundary + torch.arange(m, device=logits.device)).clamp_max(T - 1)   # (m,)
+    gathered = logits[:, pos]                                              # (B, m, V)
+    logp = gathered.log_softmax(-1)
+    tok_logp = logp.gather(-1, target_ids.clamp_max(V - 1).view(1, m, 1).expand(B, m, 1)).squeeze(-1)
+    denom = float(target_mask.sum().clamp_min(1.0))
+    return -(tok_logp * target_mask.view(1, m)).sum(-1) / denom           # (B,)
+
+
+def _loss_refusal_b_at(next_logits, refusal_token_ids, window, boundary: int) -> torch.Tensor:
+    """Refusal-unlikelihood at a window ENDING at scalar `boundary` (not the last
+    position) — needed when target tokens are appended after the boundary so the last
+    position is no longer t*. Equivalent to `_loss_refusal_b` when boundary = T-1."""
+    B, T, V = next_logits.shape
+    w = min(window, boundary + 1)
+    if w <= 0:
+        return torch.zeros(B, device=next_logits.device)
+    sl = next_logits[:, boundary - w + 1: boundary + 1].softmax(-1)        # (B, w, V)
+    first_tokens = sorted({ids[0] for ids in refusal_token_ids if ids})
+    refusal_mass = sl[:, :, first_tokens].sum(-1)                          # (B, w)
+    return -(1 - refusal_mass + 1e-9).log().mean(-1)                       # (B,)
+
+
 def _loss_refusal_bi(next_logits, refusal_token_ids, window, boundary_idx) -> torch.Tensor:
     B, T = next_logits.shape[0], next_logits.shape[1]
     w = min(window, T)
@@ -275,14 +328,17 @@ class RouteHijackAttack:
             out.append(f"{p} {decoded}")
         return out
 
-    def optimize_universal_suffix(self, prompts: list[str]) -> str:
-        """One suffix optimized on the batch; returns the decoded suffix string."""
-        suffix_ids = self._optimize(prompt_strs=prompts)
+    def optimize_universal_suffix(self, prompts: list[str], targets: list[str] | None = None) -> str:
+        """One suffix optimized on the batch; returns the decoded suffix string.
+
+        `targets` (aligned with `prompts`) are the affirmative harmful-answer openers
+        for the #1 term; pass them when `lambda_target > 0` (else ignored)."""
+        suffix_ids = self._optimize(prompt_strs=prompts, targets=targets)
         return self.tokenizer.decode(suffix_ids, skip_special_tokens=True)
 
     # ── core optimization loop ───────────────────────────────────────────
 
-    def _optimize(self, prompt_strs: list[str]) -> torch.Tensor:
+    def _optimize(self, prompt_strs: list[str], targets: list[str] | None = None) -> torch.Tensor:
         """Returns the best suffix_ids (T_suffix,).
 
         Optimisations vs. the naive version (same playbook as identify/):
@@ -320,6 +376,24 @@ class RouteHijackAttack:
                            else torch.empty(0, d_model, device=self.device, dtype=emb_layer.weight.dtype))
         # Pre-cache the (query-side) prefix embeddings — they don't change during opt.
         self._before_emb_cache = {id(b): emb_layer(b).detach() for b in before_list}
+
+        # Affirmative-target term (#1): tokenize each prompt's target answer opener to a
+        # fixed `target_len` (truncate/right-pad) and key it by the prompt's before-ids,
+        # so the grad/candidate forwards can teacher-force it. Off unless λ_target>0 and
+        # targets were supplied.
+        self._targets_on = bool(self.cfg.lambda_target > 0 and targets)
+        self._target_by_before = {}
+        if self._targets_on:
+            m = max(1, int(self.cfg.target_len))
+            for b, tgt in zip(before_list, (targets or [])):
+                ids = tok(tgt or "", add_special_tokens=False).input_ids[:m]
+                mask = [1.0] * len(ids) + [0.0] * (m - len(ids))
+                ids = ids + [tok.pad_token_id or 0] * (m - len(ids))
+                self._target_by_before[id(b)] = (
+                    torch.tensor(ids, device=self.device, dtype=torch.long),
+                    torch.tensor(mask, device=self.device, dtype=emb_layer.weight.dtype))
+            ui.info(f"affirmative-target on (λ_target={self.cfg.lambda_target}, "
+                    f"{self.cfg.target_len} tokens) — prefix-KV-cache forced off")
 
         best_loss = float("inf")
         best_suffix = suffix_ids.clone()
@@ -370,7 +444,7 @@ class RouteHijackAttack:
             hm.capture_router_logits()
             self._hm = hm
             self._prefix_cache_ok = False
-            if self.cfg.use_prefix_cache:
+            if self.cfg.use_prefix_cache and not self._targets_on:
                 self._build_prefix_cache(before_list)   # sets _prefix_cache_ok on success
             try:
                 for step in range(start_step, self.cfg.n_steps):
@@ -548,9 +622,12 @@ class RouteHijackAttack:
         A = after_emb.shape[0]
         cache = getattr(self, "_before_emb_cache", None) or {}
 
-        rows, boundary = [], []
+        targets_on = getattr(self, "_targets_on", False)
+        m = int(self.cfg.target_len) if targets_on else 0
+
+        rows, boundary, tgt_ids, tgt_mask = [], [], [], []
         lens = [b.shape[0] for b in chunk_before]
-        T_max = max(lens) + T_s + A
+        T_max = max(lens) + T_s + A + m
         for before_ids, lb in zip(chunk_before, lens):
             b_emb = cache.get(id(before_ids))
             if b_emb is None:
@@ -558,7 +635,11 @@ class RouteHijackAttack:
             parts = [b_emb, suffix_embeds]                        # [before][suffix]…
             if A:
                 parts.append(after_emb)                           # …[after = assistant marker]…
-            pad = T_max - lb - T_s - A
+            if targets_on:                                        # …[target] teacher-forced (#1)
+                tids, tmask = self._target_by_before[id(before_ids)]
+                parts.append(emb_layer(tids).detach())            # target tokens are fixed (grad flows via suffix)
+                tgt_ids.append(tids); tgt_mask.append(tmask)
+            pad = T_max - lb - T_s - A - m
             if pad > 0:                                           # …[zero pad] (ignored under causal attn)
                 parts.append(torch.zeros(pad, d, device=self.device, dtype=suffix_embeds.dtype))
             rows.append(torch.cat(parts, dim=0))                  # (T_max, d)
@@ -585,6 +666,9 @@ class RouteHijackAttack:
         per_seq = (self.cfg.lambda_suppress * L_supp
                    + self.cfg.lambda_promote * L_prom
                    + self.cfg.lambda_refusal * L_ref)
+        if targets_on:
+            L_tgt = _loss_target_bi(out.logits, torch.stack(tgt_ids), torch.stack(tgt_mask), boundary_idx)
+            per_seq = per_seq + self.cfg.lambda_target * L_tgt
         return per_seq.sum()
 
     @torch.no_grad()
@@ -641,8 +725,8 @@ class RouteHijackAttack:
         return self._cand_losses_full(before_ids, cand_suffixes, emb_layer)
 
     def _cand_losses_full(self, before_ids, cand_suffixes, emb_layer) -> list[float]:
-        """Full forward: [before][cand_suffix][after] for every candidate (no padding;
-        boundary = T-1, uniform across candidates that share the prompt)."""
+        """Full forward: [before][cand_suffix][after](+[target]) for every candidate
+        (no padding; boundary = end-of-after, uniform across candidates sharing the prompt)."""
         B = len(cand_suffixes)
         cache = getattr(self, "_before_emb_cache", None) or {}
         b_emb = cache.get(id(before_ids))
@@ -654,6 +738,11 @@ class RouteHijackAttack:
         after_emb = self._after_emb                                          # (A, d), shared
         if after_emb.shape[0]:
             parts.append(after_emb.unsqueeze(0).expand(B, -1, -1))           # (B, A, d)
+        boundary = b_emb.shape[0] + suffix_embeds.shape[1] + after_emb.shape[0] - 1
+        targets_on = getattr(self, "_targets_on", False)
+        tgt = self._target_by_before.get(id(before_ids)) if targets_on else None
+        if tgt is not None:                                                  # …[target] (#1)
+            parts.append(emb_layer(tgt[0]).detach().unsqueeze(0).expand(B, -1, -1))
         embeds = torch.cat(parts, dim=1)                                     # (B, T, d)
         T = embeds.shape[1]
 
@@ -668,7 +757,7 @@ class RouteHijackAttack:
                 captured = dict(fresh_hm.capture.router_logits)
 
         router = {l: v.view(B, T, -1) for l, v in captured.items()}
-        return self._combine_cand_losses(router, out.logits, T - 1, B)
+        return self._combine_cand_losses(router, out.logits, boundary, B, tgt)
 
     def _cand_losses_cached(self, before_ids, cand_suffixes, emb_layer) -> list[float]:
         """KV-cached forward: reuse the prompt's fixed [before] KV cache and process only
@@ -699,14 +788,20 @@ class RouteHijackAttack:
         router = {l: v.view(B, new_len, -1) for l, v in captured.items()}
         return self._combine_cand_losses(router, out.logits, new_len - 1, B)
 
-    def _combine_cand_losses(self, router, logits, boundary, B) -> list[float]:
+    def _combine_cand_losses(self, router, logits, boundary, B, tgt=None) -> list[float]:
         L_supp = _loss_suppress_b(router, self.safety, boundary)
         L_prom = (_loss_promote_b(router, self.harmful, boundary, self.cfg.promote_threshold)
                   if self.harmful else torch.zeros(B, device=self.device))
-        L_ref = _loss_refusal_b(logits, self.refusal_token_ids, self.cfg.refusal_window)
+        # When a target is appended, t* is no longer the last position → score refusal
+        # at the boundary window; otherwise the last-position form is identical.
+        L_ref = (_loss_refusal_b_at(logits, self.refusal_token_ids, self.cfg.refusal_window, boundary)
+                 if tgt is not None
+                 else _loss_refusal_b(logits, self.refusal_token_ids, self.cfg.refusal_window))
         total = (self.cfg.lambda_suppress * L_supp
                  + self.cfg.lambda_promote * L_prom
                  + self.cfg.lambda_refusal * L_ref)
+        if tgt is not None:
+            total = total + self.cfg.lambda_target * _loss_target_b(logits, tgt[0], tgt[1], boundary)
         return total.detach().cpu().tolist()
 
     def _build_prefix_cache(self, before_list) -> None:

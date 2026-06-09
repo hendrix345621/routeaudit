@@ -30,6 +30,10 @@ attacks:
     lambda_suppress: 3.0    # λ1 — suppress safety-expert routing
     lambda_promote: 1.0     # λ2 — promote harmful-expert routing (bounded)
     lambda_refusal: 1.0     # λ3 — refusal-token unlikelihood
+    lambda_target: 1.0      # λ4 — affirmative-target NLL (#1): teacher-force the AdvBench harmful
+                            # answer opener so the attack stays ON-TOPIC (not an off-topic redirect).
+                            # With λ_refusal this is the contrastive margin (#5). 0.0 = paper-faithful.
+    target_len: 16          # target tokens teacher-forced for λ4
     promote_threshold: 0.3  # m_harm — harmful routing-mass target
     refusal_window: 1       # W decoding steps scored for refusal tokens (first step)
 
