@@ -153,6 +153,9 @@ Everything is driven by [configs/base.yaml](configs/base.yaml):
     every layer still has a standard MoE gate so the attack applies), best-effort **`qwen3.5`**
     ([config header](configs/qwen3_5_moe.yaml) checklist), and `smoke` (tiny end-to-end sanity run).
     Passing a raw HF id auto-detects supported `model_type`s instead.
+  - **Qwen3-Next** (`model_type: qwen3_next`, hybrid-attention MoE) auto-detects via a raw HF id
+    the same way — no ready-made config nickname yet, but the `model_type` is already mapped to
+    the `qwen` ArchSpec preset (standard MoE gate per layer, so the attack applies as-is).
   - **DeepSeek-V4 / mHC** is *not* supported by this pipeline — its grouped/biased top-k gate
     can't be steered by the suffix attack. It lives as a separate experiment under
     [mhc/](mhc/README.md) (routing diagnostic + a written explanation of why the attack fails).
@@ -160,6 +163,9 @@ Everything is driven by [configs/base.yaml](configs/base.yaml):
   `t*` is the real decision point. Auto-falls back to raw text if the tokenizer has none.
 - **`enable_thinking`** (reasoning models — see the caveat below). Set `false` on Qwen3-family
   configs; forwarded to the chat template so the model answers directly.
+- **`chat_template_kwargs:`** — a generic passthrough block for any other kwarg a model's chat
+  template accepts, forwarded to `apply_chat_template` alongside `enable_thinking` (e.g. a custom
+  `trust_remote_code` template that wants something beyond the two built-in switches).
 - **Attack budget** (`attacks.routehijack`): suffix length `T`, steps, the `λ` weights, the
   harmful-promotion margin. CLI flags on `scripts/02_routehijack.py` tune the search
   (candidates per step, prompt subsample, grad/candidate batch sizes, early-stop patience).
@@ -178,17 +184,28 @@ that injects a foreign-language "write a poem" instruction). Two changes fix tha
   **transfers** (targets aren't model-specific).
 - **`ascii_only: false`** on the Qwen configs — because the on-topic anchor now prevents the
   redirect, the ASCII constraint is no longer needed and **cross-lingual features are kept**.
+  Same knob, two entry points: the YAML `attacks.routehijack.ascii_only` field, or the
+  `--ascii-suffix` flag on `scripts/02_routehijack.py` (either one turns it on).
 - **Judge.** ASR is screened by the string detector but the trustworthy number comes from a judge
   (`--judge`): `eval.asr.judge_kind` ∈ {`harmbench` (behaviour-conditioned, the paper standard),
   `llamaguard` (fast taxonomy judge — `Llama-Guard-3-1B`, default on the Qwen configs; **gated**,
   accept the license + `hf auth login`)}. The judge loads once and is reused across cells. Eval
-  **warns loudly** if run without a judge.
+  **warns loudly** if run without a judge. The cheap string detector ([eval/asr.py](src/routehijack/eval/asr.py))
+  also carries a hand-maintained list of Chinese/Japanese/Korean refusal phrasings, so a
+  multilingual model refusing in the language a suffix nudged it into doesn't silently inflate
+  ASR the way an English-only phrase list would — still a band-aid; the judge is the real fix.
 
 > **Roadmap — #3-MoE (experimental).** [attacks/harm_probe.py](src/routehijack/attacks/harm_probe.py)
 > + [scripts/distill_harm_probe.py](scripts/distill_harm_probe.py) distill the judge into a tiny
 > probe over **router features** (mHC-immune, MoE-native) for *judge-aware gradients* at probe
 > speed. The probe/training are built + tested; wiring `probe_loss` into the attack loss is the
-> remaining integration step.
+> remaining integration step. Run the distillation on its own:
+> ```bash
+> python scripts/distill_harm_probe.py --config qwen3.6 --judge-kind llamaguard \
+>     --judge-id meta-llama/Llama-Guard-3-1B --n-prompts 200 --out artifacts/harm_probe.pt
+> ```
+> Needs both harmful and safe examples to train on; clean AdvBench generations are mostly
+> refusals, so add `--n-samples`/`--temperature` for variety (see the script's docstring).
 
 ### ⚠ Caveat — reasoning ("thinking") models
 
@@ -207,6 +224,14 @@ token threat model), **not** a measurement of its full reasoning-mode safety. Af
 reasoning model, sanity-check that completions no longer open with a thinking preamble (some custom
 `trust_remote_code` templates ignore the kwarg and need the `/no_think` switch instead).
 
+Independent of `enable_thinking`, the ASR scorers already defend themselves against a stray or
+truncated `<think>…</think>` block: both the string `RefusalDetector` and the judge path strip a
+*completed* thinking block before matching, so a model that decides to refuse inside its own
+chain-of-thought is scored on the answer, not misread off the thinking preamble. An *unclosed*
+(truncated) thinking block is left in place and caught by dedicated reasoning-phrase patterns
+(`"must refuse"`, `"cannot provide"`, etc.) in the refusal-phrase list. This narrows the failure
+mode but doesn't replace re-anchoring `t*` — see the adaptation sketch below.
+
 **Adapting to thinking mode** is a real research extension (sketched below), not a config flag:
 
 1. **Re-anchor `t*` to the answer start** (post-`</think>`), not the first generated token — the
@@ -222,6 +247,15 @@ reasoning model, sanity-check that completions no longer open with a thinking pr
 ---
 
 ## Outputs
+
+**Live transparency.** Every phase runs through a shared terminal UI ([ui.py](src/routehijack/ui.py)):
+step headers, progress bars, and — the important part — a colored REFUSED/COMPLIED panel for a
+sample of completions as they're generated, so you're reading actual model output instead of
+trusting a single ASR number. A "refused" boolean from a string detector can lie in both
+directions (a safety-flavored compliance counted as refusal, or a vague-but-harmful response
+counted as safe); the live samples are how you catch that. The same transcripts are mirrored to
+disk as they're produced — one markdown + one JSONL file per cell under `artifacts/transcripts/`
+— so a reviewer can scroll through every sample later without re-running anything.
 
 | Artifact | Phase | Contents |
 |---|---|---|

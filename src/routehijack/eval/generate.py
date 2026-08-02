@@ -1,15 +1,7 @@
-"""Generation with arbitrary router / expert mutators.
-
-The attack modules supply their own router/expert mutators (RouteHijack's
-router capture, SAE inversion's expert mutator), wired through the same
-`MoEHookManager` machinery.
-
-`DefenseBundle` is kept for name compatibility but is just a generic hook
-bundle: any callable matching the mutator signature can be plugged in.
-"""
+"""Generation with a pluggable router mutator, via `MoEHookManager`."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 import torch
@@ -18,17 +10,13 @@ from ..model.hooks import MoEHookManager
 
 
 RouterMutator = Callable[[torch.Tensor, int, int], torch.Tensor]   # (logits, layer, step) -> logits
-ExpertMutator = Callable[[torch.Tensor, int, int, int], torch.Tensor]  # (out, layer, expert, step) -> out
 
 
 @dataclass
 class DefenseBundle:
-    """Renamed semantically but kept the same class name so existing eval code
-    doesn't need rewiring. Holds any router / expert mutators."""
+    """Holds an optional router mutator, wired into generation via `MoEHookManager`."""
 
     router_mutator: Optional[RouterMutator] = None
-    expert_mutators: dict[tuple[int, int], ExpertMutator] = field(default_factory=dict)
-    moe_out_mutators: dict[int, Callable] = field(default_factory=dict)   # layer -> fn (moe_out tap)
 
 
 @torch.no_grad()
@@ -52,10 +40,6 @@ def generate_with_defense(
     with MoEHookManager(model, spec) as hm:
         if defense.router_mutator is not None:
             hm.set_router_mutator(defense.router_mutator)
-        for (layer, expert), fn in defense.expert_mutators.items():
-            hm.set_expert_mutator(layer, expert, fn)
-        for layer, fn in defense.moe_out_mutators.items():
-            hm.set_moe_out_mutator(layer, fn)
 
         out_ids = ids
         past_key_values = None
@@ -141,43 +125,3 @@ def generate_batch(
     finally:
         tokenizer.padding_side = prev_side
     return completions
-
-
-@torch.no_grad()
-def last_prompt_logits(
-    model,
-    tokenizer,
-    prompt: str,
-    *,
-    defense: DefenseBundle = DefenseBundle(),
-    device: str | torch.device | None = None,
-    spec=None,
-    want_template: bool = True,
-) -> torch.Tensor:
-    """Logits at the final prompt position (vocab,), with mutators installed.
-
-    Used by the greedy causal filter's cheap jailbreak proxy — Beyond Sorry track
-    the probability of the first-person pronoun "I" here. Rendered through the chat
-    template so the boundary is the real response-start position; otherwise P("I")
-    isn't a refusal opener and the proxy measures noise.
-    """
-    from ..model.prompting import encode_prompt
-    device = device or next(model.parameters()).device
-    ids = encode_prompt(tokenizer, prompt, want_template=want_template, device=device).unsqueeze(0)
-    with MoEHookManager(model, spec) as hm:
-        if defense.router_mutator is not None:
-            hm.set_router_mutator(defense.router_mutator)
-        for (layer, expert), fn in defense.expert_mutators.items():
-            hm.set_expert_mutator(layer, expert, fn)
-        for layer, fn in defense.moe_out_mutators.items():
-            hm.set_moe_out_mutator(layer, fn)
-        out = model(input_ids=ids, use_cache=False)
-    return out.logits[0, -1]
-
-
-def prob_of_token(logits: torch.Tensor, tokenizer, token_str: str = " I") -> float:
-    """Softmax probability of `token_str`'s first sub-token at the given logits row."""
-    tid = tokenizer(token_str, add_special_tokens=False).input_ids
-    if not tid:
-        return 0.0
-    return float(logits.float().softmax(-1)[tid[0]].item())

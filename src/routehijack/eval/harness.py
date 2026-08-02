@@ -1,8 +1,6 @@
 """Lean evaluation harness: run one attack "cell" over a prompt set, score ASR
 (RefusalDetector, optional HarmBench judge) + optional MMLU, write transcripts,
 and render a SAFE / AT-RISK verdict table.
-
-Replaces the heavier benchmarks/report.py `Cell` machinery.
 """
 from __future__ import annotations
 
@@ -17,11 +15,10 @@ from .mmlu import mmlu_logprob_accuracy
 
 
 def _has_mutators(defense: DefenseBundle) -> bool:
-    """True if the cell installs any router/expert/moe_out mutator — those require
-    the per-prompt step-by-step decode loop. RouteHijack is input-only (the attack
-    lives in the prompt text), so its cells have none and can use batched generation."""
-    return (defense.router_mutator is not None
-            or bool(defense.expert_mutators) or bool(defense.moe_out_mutators))
+    """True if the cell installs a router mutator — that requires the per-prompt
+    step-by-step decode loop. RouteHijack is input-only (the attack lives in the
+    prompt text), so its cells have none and can use batched generation."""
+    return defense.router_mutator is not None
 
 
 @dataclass

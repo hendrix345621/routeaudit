@@ -128,8 +128,8 @@ def from_hf(model_id: str, *, template: str = "base",
             dtype: str = "bfloat16", device_map: str = "auto") -> SimpleNamespace:
     """Build a full config for a HuggingFace MoE model id, auto-detecting arch + dims.
 
-    Non-model blocks (sae/identify/cc_delta/attacks/eval) are inherited from the
-    `template` config (defaults), with `sae.d_input` pinned to the detected hidden size.
+    Non-model blocks (identify/attacks/eval) are inherited from the `template`
+    config (defaults).
     """
     try:
         from transformers import AutoConfig
@@ -144,10 +144,6 @@ def from_hf(model_id: str, *, template: str = "base",
         ) from e
     cfg = load(template)
     cfg.model = _model_ns_from_hf(hf_cfg, model_id, dtype=dtype, device_map=device_map)
-    # The SAE pipeline is optional (and absent from the trimmed default template);
-    # only pin its input dim if the template actually carries an `sae` block.
-    if hasattr(cfg, "sae"):
-        cfg.sae.d_input = cfg.model.d_model
     return cfg
 
 
