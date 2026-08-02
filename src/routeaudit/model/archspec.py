@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
 # Per-family module-layout presets. `moe_block_attrs` lists candidate attribute
 # names tried in order (first existing wins) so a spec survives cross-version
 # renames (e.g. Mixtral moved block_sparse_moe → mlp when experts were fused).

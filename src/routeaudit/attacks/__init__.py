@@ -1,5 +1,5 @@
-from .suffix_search import RouteAuditConfig, SuffixSearchRunner, measure_routing_shift
 from .compose import apply_routeaudit_suffix
+from .suffix_search import RouteAuditConfig, SuffixSearchRunner, measure_routing_shift
 
 __all__ = [
     "RouteAuditConfig",

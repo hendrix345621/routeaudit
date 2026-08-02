@@ -41,7 +41,6 @@ from .. import ui
 from ..identify.select import SafetyExpert
 from ..model.hooks import MoEHookManager
 
-
 REFUSAL_PREFIXES = [
     "I cannot", "I can't", "I'm sorry", "I am sorry", "Sorry,",
     "I won't", "I will not", "As an AI", "I'm unable", "I am unable",

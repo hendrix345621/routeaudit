@@ -27,7 +27,6 @@ from typing import Callable, Optional
 
 import torch
 
-
 # ─────────────────────────── Capture container ───────────────────────────
 
 

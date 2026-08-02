@@ -8,7 +8,6 @@ import torch
 
 from ..model.hooks import MoEHookManager
 
-
 RouterMutator = Callable[[torch.Tensor, int, int], torch.Tensor]   # (logits, layer, step) -> logits
 
 

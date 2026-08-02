@@ -10,8 +10,11 @@ This is a research tool for **authorized** red-teaming and safety evaluation of 
 have permission to test — see [Note on responsible use](#note-on-responsible-use) below.
 
 > Reproduces the method from *RouteHijack: Routing-Aware Attack on Mixture-of-Experts LLMs*
-> ([arXiv:2605.02946](https://arxiv.org/abs/2605.02946)) — the paper this tool is named after
-> and implements; RouteAudit is our name for the implementation and evaluation harness.
+> ([arXiv:2605.02946](https://arxiv.org/abs/2605.02946)) — that's the name of the paper this
+> tool implements; RouteAudit is our name for the implementation and evaluation harness.
+
+See [TIMELINE.md](TIMELINE.md) for the project's history, how each feature was added, and
+what's on the roadmap — this README stays focused on how to use it today.
 
 ---
 
@@ -198,17 +201,16 @@ that injects a foreign-language "write a poem" instruction). Two changes fix tha
   multilingual model refusing in the language a suffix nudged it into doesn't silently inflate
   ASR the way an English-only phrase list would — still a band-aid; the judge is the real fix.
 
-> **Roadmap — #3-MoE (experimental).** [attacks/harm_probe.py](src/routeaudit/attacks/harm_probe.py)
+> **Experimental — the harm-probe distillation.** [attacks/harm_probe.py](src/routeaudit/attacks/harm_probe.py)
 > + [scripts/distill_harm_probe.py](scripts/distill_harm_probe.py) distill the judge into a tiny
-> probe over **router features** (mHC-immune, MoE-native) for *judge-aware gradients* at probe
-> speed. The probe/training are built + tested; wiring `probe_loss` into the attack loss is the
-> remaining integration step. Run the distillation on its own:
+> probe over **router features** for *judge-aware gradients* at probe speed. Run it on its own:
 > ```bash
 > python scripts/distill_harm_probe.py --config qwen3.6 --judge-kind llamaguard \
 >     --judge-id meta-llama/Llama-Guard-3-1B --n-prompts 200 --out artifacts/harm_probe.pt
 > ```
 > Needs both harmful and safe examples to train on; clean AdvBench generations are mostly
 > refusals, so add `--n-samples`/`--temperature` for variety (see the script's docstring).
+> Status and what's left to wire up: see [TIMELINE.md](TIMELINE.md#roadmap--open-threads).
 
 ### ⚠ Caveat — reasoning ("thinking") models
 
@@ -235,17 +237,9 @@ chain-of-thought is scored on the answer, not misread off the thinking preamble.
 (`"must refuse"`, `"cannot provide"`, etc.) in the refusal-phrase list. This narrows the failure
 mode but doesn't replace re-anchoring `t*` — see the adaptation sketch below.
 
-**Adapting to thinking mode** is a real research extension (sketched below), not a config flag:
-
-1. **Re-anchor `t*` to the answer start** (post-`</think>`), not the first generated token — the
-   safety decision in a reasoning model lives at the answer onset, deep in the generation.
-2. **Localize on answer tokens**, masking the chain-of-thought, so harvest flags the experts that
-   fire when the *answer* refuses vs complies (the response-driven idea, with "response" = answer).
-3. **Make it tractable** — the cheap path freezes one clean thinking prefix and optimizes the suffix
-   to flip routing at the answer onset given that prefix (no per-candidate rollout); the faithful
-   path rolls out thinking per step (far more expensive). A genuinely open question is whether
-   reasoning models are *more robust* to routing attacks because safety is deliberated over many
-   tokens rather than snap-decided at `t*` — itself a worthwhile alignment result.
+**Adapting to thinking mode** is a real research extension, not a config flag — re-anchoring `t*`
+to the post-`</think>` answer start, localizing on answer tokens only, and making the rollout
+tractable. Sketched in [TIMELINE.md](TIMELINE.md#roadmap--open-threads).
 
 ---
 

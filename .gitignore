@@ -20,6 +20,7 @@ artifacts/
 
 # my
 todo.md
+TIMELINE.md
 
 # separate experiments (not part of the main pipeline)
 experiments/

@@ -1,6 +1,6 @@
 from .asr import RefusalDetector, score_refusal, score_with_classifier
+from .generate import DefenseBundle, generate_with_defense
 from .mmlu import mmlu_logprob_accuracy
-from .generate import generate_with_defense, DefenseBundle
 
 __all__ = [
     "RefusalDetector",

@@ -13,7 +13,6 @@ import torch
 from ..model.hooks import MoEHookManager
 from .generate import DefenseBundle
 
-
 PROMPT_TEMPLATE = "Question: {q}\nA) {a}\nB) {b}\nC) {c}\nD) {d}\nAnswer:"
 
 
