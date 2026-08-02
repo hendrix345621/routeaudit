@@ -162,9 +162,29 @@ Everything is driven by [configs/base.yaml](configs/base.yaml):
   - **Qwen3-Next** (`model_type: qwen3_next`, hybrid-attention MoE) auto-detects via a raw HF id
     the same way — no ready-made config nickname yet, but the `model_type` is already mapped to
     the `qwen` ArchSpec preset (standard MoE gate per layer, so the attack applies as-is).
-  - **DeepSeek-V4 / mHC** is *not* supported by this pipeline — its grouped/biased top-k gate
-    can't be steered by the suffix attack. It lives as a separate experiment under
-    [experiments/mhc/](experiments/mhc/README.md) (routing diagnostic + a written explanation of why the method fails).
+  - **DeepSeekMoE** (`deepseek_v2` / `v3` / `v4`) — nicknames `deepseek-v4-flash`,
+    `deepseek-v2-lite`. Its gate isn't a softmax, so its semantics come from a `routing:` config
+    block read by [gate_math.GateSpec](src/routeaudit/model/gate_math.py): `sqrt(softplus)`
+    affinity with **flat** top-6 on V4-Flash, `sigmoid` with node-limited top-k on V2/V3, a
+    selection-only balancing bias, and hash-routed leading layers on V4.
+
+    | phase | DeepSeekMoE |
+    |---|---|
+    | 00 data · eval ASR/MMLU | ✅ architecture-independent |
+    | 01 harvest | ✅ selection recomputed through the real gate; hash/dense layers excluded from expert selection |
+    | 02 routeaudit (suffix attack) | ❌ raises `UnsupportedGateError` at construction — the losses are `softmax(router_logits)` over a tensor this gate never emits |
+    | routing shift (TESR/THPR) | ✅ via [experiments/mhc/route_mhc.py](experiments/mhc/route_mhc.py) |
+
+    Porting the optimizer (bias-free gating weights + a selection-margin hinge) is phase P2 in
+    [experiments/mhc/plan.md](experiments/mhc/plan.md). The gate is also not yet checked
+    bit-for-bit against the released weights — that fixture check is written and pending access.
+  - **mHC** (DeepSeek-V4's multi-stream residual) is handled at the hook layer: residual captures
+    record their stream count so analyses reduce with
+    [mhc.reduce_residual](src/routeaudit/model/mhc.py) instead of flattening 4 streams together.
+    Gate capture is unaffected — `hc_pre` hands the gate a normal `(T, d)` input.
+  - **fp8/fp4 checkpoints** load as-shipped (`dtype: fp8` → `torch_dtype="auto"`). V4's weights
+    are quantization-aware-trained, so [precision.py](src/routeaudit/model/precision.py) refuses
+    a bitsandbytes pass on top of them.
 - **`use_chat_template`** renders prompts through the instruct template so the boundary token
   `t*` is the real decision point. Auto-falls back to raw text if the tokenizer has none.
 - **`enable_thinking`** (reasoning models — see the caveat below). Set `false` on Qwen3-family

@@ -24,6 +24,28 @@ class LoadedModel:
 _DTYPES = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
 
 
+def _resolve_dtype(model_ns):
+    """`model.dtype` → a torch dtype, or "auto" for a checkpoint that ships below bf16.
+
+    DeepSeek-V4 ships fp8 weights with fp4 experts, quantization-aware-trained: that IS
+    the deployed model, so there is no bf16 original to cast to and forcing one would be
+    both wrong and enormous. `"auto"` tells transformers to honor the checkpoint's own
+    dtype and quantization config.
+    """
+    name = str(getattr(model_ns, "dtype", "bfloat16"))
+    if name in _DTYPES:
+        return _DTYPES[name]
+    from .precision import native_precision
+    if native_precision(model_ns):
+        ui.info(f"dtype '{name}' is the checkpoint's native precision (QAT) — "
+                f"loading as-shipped with torch_dtype='auto'.")
+        return "auto"
+    raise ValueError(
+        f"model.dtype='{name}' is not a supported load dtype. Use one of "
+        f"{sorted(_DTYPES)}, or a native low-precision name (fp8/fp4/...) for a "
+        f"checkpoint that ships quantized.")
+
+
 def _coerce_max_memory(mm):
     """`model.load.max_memory` arrives as a SimpleNamespace (YAML dict → ns) or dict.
     transformers wants a plain dict keyed by device int / "cpu" → "78GiB"."""
@@ -51,7 +73,7 @@ def _load_opts(model_ns) -> dict:
 
 
 def load_model(cfg) -> LoadedModel:
-    dtype = _DTYPES[cfg.model.dtype]
+    dtype = _resolve_dtype(cfg.model)
     tok = AutoTokenizer.from_pretrained(cfg.model.hf_id, trust_remote_code=True)
     opts = _load_opts(cfg.model)
 

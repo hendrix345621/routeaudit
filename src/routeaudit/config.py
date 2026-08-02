@@ -35,6 +35,14 @@ MODELS: dict[str, str] = {
     "qwen3_5": "configs/qwen3_5_moe.yaml",
     "qwen3.6": "configs/qwen3_6_35b_a3b.yaml",     # dims verified from config.json (hybrid attention)
     "qwen3_6": "configs/qwen3_6_35b_a3b.yaml",
+    # DeepSeekMoE. V2-Lite is the cheap sibling used to exercise the grouped-gate path;
+    # V4-Flash is the mHC target (sqrtsoftplus + flat top-6 + hash-routed first layers).
+    # Both support harvest + eval; neither supports the suffix attack (see their headers).
+    "deepseek-v2-lite": "configs/deepseek_v2_lite.yaml",
+    "deepseek_v2_lite": "configs/deepseek_v2_lite.yaml",
+    "deepseek-v4-flash": "configs/deepseek_v4_flash.yaml",
+    "deepseek_v4_flash": "configs/deepseek_v4_flash.yaml",
+    "deepseek-v4": "configs/deepseek_v4_flash.yaml",
     "smoke": "configs/smoke.yaml",
 }
 
@@ -80,8 +88,22 @@ _HF_TYPE_TO_PRESET: dict[str, str] = {
     "qwen3_5_moe": "qwen",     # Qwen3.5 / Qwen3.6 hybrid-attention MoE (every layer has a standard
                               # MoE mlp; linear/full attention sublayers don't affect router capture)
     "phimoe": "phimoe",
-    # DeepSeekMoE is handled as a separate experiment under experiments/mhc/ (its grouped/
-    # biased gate is not steerable by the suffix search); it is deliberately not mapped here.
+    # DeepSeekMoE. The gate is not a softmax — its semantics come from the `routing:`
+    # block via `gate_math.GateSpec`, filled in by `_routing_ns_from_hf` below.
+    "deepseek_v2": "deepseek",
+    "deepseek_v3": "deepseek",
+    "deepseek_v4": "deepseek",
+}
+
+# Per-family gate defaults, applied when the HF config doesn't state them. V2/V3 ship a
+# sigmoid + node-limited gate; V4 replaced that with sqrt(softplus) and FLAT top-k, and
+# added hash routing for the leading MoE layers. Anything the config does declare wins.
+_ROUTING_DEFAULTS: dict[str, dict] = {
+    "deepseek_v2": dict(scoring_func="sigmoid", use_bias=True, norm_topk_prob=True),
+    "deepseek_v3": dict(scoring_func="sigmoid", use_bias=True, norm_topk_prob=True),
+    "deepseek_v4": dict(scoring_func="sqrtsoftplus", use_bias=True, norm_topk_prob=True,
+                        n_group=1, topk_group=0, routed_scaling_factor=1.5,
+                        num_hash_layers=3),
 }
 
 
@@ -97,6 +119,50 @@ def _hf_get(cfg, *names, default=None):
     return default
 
 
+def _routing_ns_from_hf(hf_cfg, mt: str, top_k: int) -> SimpleNamespace | None:
+    """Build the `model.routing` block (read by `gate_math.GateSpec.from_config`).
+
+    Returns None for families whose gate is a plain softmax over logits — those need no
+    routing block, and omitting it keeps their configs byte-identical to before.
+    """
+    defaults = _ROUTING_DEFAULTS.get(mt or "")
+    if defaults is None:
+        return None
+    ns = dict(
+        defaults,
+        top_k=top_k,
+        n_group=int(_hf_get(hf_cfg, "n_group", default=defaults.get("n_group", 1)) or 1),
+        topk_group=int(_hf_get(hf_cfg, "topk_group", default=defaults.get("topk_group", 0)) or 0),
+        first_k_dense_replace=int(_hf_get(hf_cfg, "first_k_dense_replace", default=0) or 0),
+        num_hash_layers=int(
+            _hf_get(hf_cfg, "num_hash_layers", default=defaults.get("num_hash_layers", 0)) or 0),
+    )
+    for key, names in (
+        ("scoring_func", ("scoring_func",)),
+        ("norm_topk_prob", ("norm_topk_prob",)),
+        ("routed_scaling_factor", ("routed_scaling_factor", "route_scale")),
+    ):
+        v = _hf_get(hf_cfg, *names)
+        if v is not None:
+            ns[key] = v
+    return SimpleNamespace(**ns)
+
+
+def _mhc_ns_from_hf(hf_cfg) -> SimpleNamespace | None:
+    """The `model.mhc` block, when the checkpoint has a multi-stream residual.
+
+    `hc_mult > 1` is what tells residual-space tooling that per-layer hidden states are
+    (T, n, d) rather than (T, d) — see `model/mhc.py`.
+    """
+    n = _hf_get(hf_cfg, "hc_mult", "n_hc", "expansion_rate")
+    if not n or int(n) <= 1:
+        return None
+    return SimpleNamespace(
+        hc_mult=int(n),
+        hc_sinkhorn_iters=int(_hf_get(hf_cfg, "hc_sinkhorn_iters", "sinkhorn_tmax", default=20) or 20),
+    )
+
+
 def _model_ns_from_hf(hf_cfg, model_id: str, *, dtype: str, device_map: str) -> SimpleNamespace:
     """Build the `model` config block from a fetched HF config, or raise
     UnsupportedModelError with an explanation. Pure (no network) — testable."""
@@ -110,19 +176,31 @@ def _model_ns_from_hf(hf_cfg, model_id: str, *, dtype: str, device_map: str) -> 
         raise UnsupportedModelError(
             f"'{model_id}' (model_type={mt!r}) is not a supported MoE. This tool needs a "
             f"routed-expert Mixture-of-Experts; supported families: OLMoE, Mixtral, "
-            f"Qwen2/3-MoE, Phi-MoE (model_type {sorted(_HF_TYPE_TO_PRESET)}). Other MoE "
-            f"variants (e.g. DBRX, GPT-OSS, Granite-MoE) need a hand-written config in "
-            f"configs/ plus a matching ArchSpec preset in model/archspec.py. DeepSeek-V4 / "
-            f"mHC is handled as a separate experiment under experiments/mhc/ "
-            f"(see experiments/mhc/README.md)."
+            f"Qwen2/3-MoE, Phi-MoE, DeepSeekMoE V2/V3/V4 (model_type "
+            f"{sorted(_HF_TYPE_TO_PRESET)}). Other MoE variants (e.g. DBRX, GPT-OSS, "
+            f"Granite-MoE) need a hand-written config in configs/ plus a matching "
+            f"ArchSpec preset in model/archspec.py."
         )
-    return SimpleNamespace(
+    ns = SimpleNamespace(
         hf_id=model_id, dtype=dtype, device_map=device_map,
         n_layers=int(n_layers), n_experts=int(n_experts), top_k=int(top_k or 0),
         d_model=int(d_model),
         d_expert=int(_hf_get(hf_cfg, "moe_intermediate_size", "intermediate_size", default=0) or 0),
         arch=SimpleNamespace(name=preset),
     )
+    routing = _routing_ns_from_hf(hf_cfg, mt or "", int(top_k or 0))
+    if routing is not None:
+        ns.routing = routing
+    mhc_ns = _mhc_ns_from_hf(hf_cfg)
+    if mhc_ns is not None:
+        ns.mhc = mhc_ns
+    # QAT-native checkpoints (V4 ships fp8 weights / fp4 experts) — `model/precision.py`
+    # reads this to refuse a re-quantized load that would add error the real model has not.
+    for key in ("expert_dtype", "weights_dtype", "quantization_dtype"):
+        v = _hf_get(hf_cfg, key)
+        if isinstance(v, str):
+            setattr(ns, "expert_dtype" if key == "expert_dtype" else "weights_dtype", v)
+    return ns
 
 
 def from_hf(model_id: str, *, template: str = "base",

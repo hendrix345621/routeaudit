@@ -72,6 +72,7 @@ def compute_expert_freq(
     max_total_tokens: int = 1024,
     batch_size: int = 16,
     spec=None,
+    gate_spec=None,
     use_chat_template: bool = True,
 ) -> ExpertFreq:
     """Compute F_l(e | a) over a corpus of sequences.
@@ -88,6 +89,8 @@ def compute_expert_freq(
                            long sequence from dominating wall-time.
       batch_size:         sequences per forward pass. Higher = better GPU
                           utilisation; lower if VRAM is tight.
+      gate_spec:          a :class:`~routeaudit.model.gate_math.GateSpec`. Required for
+                          any gate whose selection isn't `logits.topk(k)` — see below.
     """
     device = device or next(model.parameters()).device
     pad_id = tokenizer.pad_token_id
@@ -140,9 +143,21 @@ def compute_expert_freq(
     # hooks live inside the decoder layers, so we get identical router logits while
     # skipping the lm_head, whose (B, T, vocab) logits tensor is a large VRAM spike
     # we never use. Falls back to the full model if there's no `.model` attribute.
+    # Which capture the gate needs. `topk(router_logits)` (Eq. 3 as literally written)
+    # is only correct when selection IS a plain top-k over the logits. A DeepSeek-style
+    # gate breaks that three ways: a selection-only balancing bias shifts which experts
+    # win, node-limited routing masks whole groups out, and the gate may emit no logit
+    # tensor at all (V4 returns `(weights, indices)` — top-k-ing that would count over
+    # `top_k` phantom "experts" rather than the real E). So recompute the selection.
+    use_selection = gate_spec is not None and (
+        getattr(spec, "router_output", "") == "recompute" or not gate_spec.is_plain_topk)
+
     fwd = getattr(model, "model", model)
     with MoEHookManager(model, spec) as hm:
-        hm.capture_router_logits()
+        if use_selection:
+            hm.capture_expert_selection(gate_spec)
+        else:
+            hm.capture_router_logits()
 
         for batch in ui.iter_with_progress(batches, desc=desc):
             B = len(batch)
@@ -169,14 +184,33 @@ def compute_expert_freq(
             count_mask = (ar >= n_prompts.to(device).unsqueeze(1)) & \
                          (ar < real_lens.to(device).unsqueeze(1))           # (B, T_pad)
 
-            for layer, logits in hm.capture.router_logits.items():
-                E = logits.shape[-1]
-                lg = logits.view(B, T_pad, E)                              # un-flatten B*T
-                _, idx = lg.topk(top_k, dim=-1)
-                tk = torch.zeros_like(lg, dtype=torch.bool)
-                tk.scatter_(-1, idx, True)                                 # (B, T_pad, E) top-k mask
-                # Zero out prompt + padding positions, then sum over (B, T_pad).
-                counts[layer] += (tk & count_mask.unsqueeze(-1)).sum(dim=(0, 1)).double()
+            if use_selection:
+                # Selection recomputed through the gate's real semantics. Hash-routed and
+                # dense layers never appear here — they carry no content-driven routing,
+                # so they stay at zero and are masked out before expert selection.
+                for layer, sel_idx in hm.capture.expert_indices.items():
+                    idx = sel_idx.view(B, T_pad, -1)
+                    tk = torch.zeros(B, T_pad, n_experts, dtype=torch.bool, device=device)
+                    tk.scatter_(-1, idx, True)
+                    counts[layer] += (tk & count_mask.unsqueeze(-1)).sum(dim=(0, 1)).double()
+            else:
+                for layer, logits in hm.capture.router_logits.items():
+                    E = logits.shape[-1]
+                    if E != n_experts:
+                        raise RuntimeError(
+                            f"layer {layer}: the gate's output has {E} columns, not "
+                            f"n_experts={n_experts}. This gate does not emit a router-logit "
+                            f"tensor — DeepSeek's returns (weights, indices), so top-k-ing "
+                            f"it would count over {E} positions as if they were experts. "
+                            f"Pass a `gate_spec` (GateSpec.from_config(cfg.model)) so the "
+                            f"selection is recomputed through the real gate; check that the "
+                            f"config's `routing:` block and `arch.router_output` are set.")
+                    lg = logits.view(B, T_pad, E)                          # un-flatten B*T
+                    _, idx = lg.topk(top_k, dim=-1)
+                    tk = torch.zeros_like(lg, dtype=torch.bool)
+                    tk.scatter_(-1, idx, True)                             # (B, T_pad, E) top-k mask
+                    # Zero out prompt + padding positions, then sum over (B, T_pad).
+                    counts[layer] += (tk & count_mask.unsqueeze(-1)).sum(dim=(0, 1)).double()
 
             total_tokens += count_mask.sum().double()
 

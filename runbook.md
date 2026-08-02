@@ -19,7 +19,7 @@ It uploads nothing. For non-interactive use: `make run MODEL=qwen3`.
 
 > `setup_ram.sh` grows `/dev/shm` to 26 GB and points HF cache + `data/ cache/ artifacts/` at
 > RAM. Fine for OLMoE-1B-7B-class models. It is nowhere near enough for large targets (e.g.
-> DeepSeek-V4-Flash ≈ 570 GB in bf16 — that needs real multi-GPU, not a RAM disk).
+> DeepSeek-V4-Flash ships fp8 at ≈ 160 GB — that needs a 2×80 GB node, not a RAM disk).
 
 ## What the phases produce
 
@@ -52,12 +52,25 @@ supported `model_type`s, else raises `UnsupportedModelError` with guidance.
 DBRX / GPT-OSS / Granite-MoE are **not** wired in: their gates return tuples / sit at non-standard
 paths and need an ArchSpec router-path generalization first.
 
-### DeepSeek-V4 / mHC — separate experiment, not in this pipeline
+### DeepSeekMoE / mHC — routing analysis supported, attack not ported
 
-DeepSeek-V4's grouped/biased top-k gate cannot be steered by the suffix attack, so it is **not**
-part of the main pipeline. It lives on its own under [experiments/mhc/](experiments/mhc/README.md): a faithful routing
-diagnostic (`python experiments/mhc/route_mhc.py`), a best-effort config + verification checklist, and a
-written explanation (`experiments/mhc/README.md`) of why the method fails and what would be required to try.
+The gate is supported for **routing analysis**: `arch.name: deepseek` plus a `routing:` block
+gives correct capture on V2/V3 (sigmoid + node-limited top-k) and V4-Flash (`sqrt(softplus)` +
+flat top-6 + selection-only bias + hash-routed first layers). mHC's 4-stream residual is handled
+at the hook layer. The **suffix attack is not ported** — its losses assume `softmax(logits)`.
+
+The research lives under [experiments/mhc/](experiments/mhc/README.md):
+
+```bash
+python experiments/mhc/tests/run_synthetic.py                 # CPU, seconds — mechanism check
+python experiments/mhc/route_mhc.py --config deepseek-v2-lite # routing mass at t*
+python experiments/mhc/tests/run_diagnostics.py --config deepseek-v2-lite --quant nf4 \
+    --tests margin,leverage,selection,routing,reachability,norm,conservation
+```
+
+Precision note: V4-Flash's fp8/fp4 weights are QAT-native, so bitsandbytes NF4 on top adds error
+the deployed model doesn't have — `model/precision.py` refuses that combination. NF4 stays fine
+for the bf16 sibling (V2-Lite ≈ 9 GB).
 
 ## Large models on spot/rented GPUs — cost playbook (Qwen3-235B and up)
 

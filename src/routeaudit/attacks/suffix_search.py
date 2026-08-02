@@ -274,11 +274,54 @@ def _loss_refusal_bi(next_logits, refusal_token_ids, window, boundary_idx) -> to
     return -(1 - refusal_mass + 1e-9).log().mean(-1)                     # (B,)
 
 
+# ─────────────────────────── Gate support ───────────────────────────
+
+
+def _require_supported_gate(spec, gate_spec) -> None:
+    """Fail fast on a gate the routing losses cannot express.
+
+    Every `_loss_suppress*` / `_loss_promote*` above is `router_logits.softmax(-1)`
+    indexed by expert id. That is only the model's routing when selection is a plain
+    top-k over a real `(T, n_experts)` logit tensor. A DeepSeek-style gate breaks it:
+    the balancing bias and group mask change which experts fire, and V4's gate emits
+    `(weights, indices)` — so the "logits" would be a `(T, top_k)` weight vector and
+    indexing it by expert id raises an IndexError several minutes into a GPU run.
+
+    Porting the search means replacing the softmax-mass terms with bias-free gating
+    weights plus a selection-margin hinge on `score + bias`, and adding a differentiable
+    surrogate for the hard top-k. That is phase P2 in experiments/mhc/plan.md, gated on
+    the P1 feasibility verdict — deliberately not attempted here.
+    """
+    recompute = getattr(spec, "router_output", "") == "recompute"
+    plain = gate_spec is None or gate_spec.is_plain_topk
+    if not recompute and plain:
+        return
+    name = getattr(spec, "name", "this model")
+    detail = ("its gate emits (weights, indices), not a router-logit tensor"
+              if recompute else
+              f"its selection is not a plain top-k over logits "
+              f"(scoring_func={gate_spec.scoring_func}, bias={gate_spec.use_bias}, "
+              f"grouped={gate_spec.grouped})")
+    raise UnsupportedGateError(
+        f"the suffix search does not support the '{name}' gate: {detail}. Its routing "
+        f"losses assume softmax(router_logits) over the expert axis, which does not "
+        f"describe this model's routing. Harvest, eval and the routing diagnostics DO "
+        f"work — run `make harvest`, `experiments/mhc/route_mhc.py`, and "
+        f"`experiments/mhc/tests/run_diagnostics.py`. Porting the optimizer is phase P2 "
+        f"in experiments/mhc/plan.md.")
+
+
+class UnsupportedGateError(NotImplementedError):
+    """The attack's routing losses cannot express this gate's selection."""
+
+
 # ─────────────────────────── Attack driver ───────────────────────────
 
 
 class SuffixSearchRunner:
-    def __init__(self, cfg: RouteAuditConfig, model, tokenizer, device=None, spec=None):
+    def __init__(self, cfg: RouteAuditConfig, model, tokenizer, device=None, spec=None,
+                 gate_spec=None):
+        _require_supported_gate(spec, gate_spec)
         self.cfg = cfg
         self.model = model
         self.tokenizer = tokenizer

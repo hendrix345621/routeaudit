@@ -35,11 +35,36 @@ from .identify.select import (
     select_safety_experts,
 )
 from .model import sizing
+from .model.gate_math import GateSpec, learned_router_layers
 from .model.loader import disable_grad_checkpointing, enable_grad_checkpointing
 
 
 def _g(args, name, default):
     return getattr(args, name, default)
+
+
+def _mask_unroutable(score: torch.Tensor, n_layers: int, gate_spec) -> torch.Tensor:
+    """Exclude layers whose routing isn't driven by content, before top-pct selection.
+
+    Hash-routed and dense layers never register an activation, so every one of their
+    cells scores exactly 0.0. That is not neutral: `Score_safe = Δ_S − P_gen²` is
+    NEGATIVE for any expert that fires more on harmful text, so a wall of 0.0 cells
+    outranks real experts and floods the safety set with cells no input can move. On
+    DeepSeek-V4-Flash that is 3 × 256 = 768 phantom candidates.
+
+    Masking to −inf keeps them out of `topk` entirely. A no-op on every fully
+    content-routed family (OLMoE, Mixtral, Qwen, Phi-MoE, DeepSeek-V2/V3).
+    """
+    routed = learned_router_layers(n_layers, gate_spec)
+    if len(routed) >= n_layers:
+        return score
+    keep = torch.zeros(n_layers, dtype=torch.bool)
+    keep[routed] = True
+    out = score.clone()
+    out[~keep] = float("-inf")
+    ui.info(f"excluded {n_layers - len(routed)} non-content-routed layer(s) from expert "
+            f"selection (hash-routed / dense): {sorted(set(range(n_layers)) - set(routed))}")
+    return out
 
 
 # ─────────────────────────────── Harvest ───────────────────────────────
@@ -59,7 +84,8 @@ def harvest_run(loaded, cfg, args) -> dict:
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     use_tmpl = getattr(cfg.model, "use_chat_template", True)
-    fk = dict(n_layers=L, n_experts=E, top_k=K, spec=spec,
+    gate_spec = GateSpec.from_config(cfg.model)
+    fk = dict(n_layers=L, n_experts=E, top_k=K, spec=spec, gate_spec=gate_spec,
               batch_size=_g(args, "freq_batch_size", 16), use_chat_template=use_tmpl)
 
     def _sweep(name, make_iter):
@@ -77,8 +103,8 @@ def harvest_run(loaded, cfg, args) -> dict:
     harm = _sweep("F_harm", lambda: iter_harm_pairs(cfg.identify.pairs_path))
     gen = _sweep("F_gen", lambda: iter_general(cfg.identify.general_corpus_path))
 
-    s_safe = score_safe(safe, harm, gen)
-    s_harm = score_harm(safe, harm)
+    s_safe = _mask_unroutable(score_safe(safe, harm, gen), L, gate_spec)
+    s_harm = _mask_unroutable(score_harm(safe, harm), L, gate_spec)
     top_pct = cfg.identify.top_pct
     safety_experts = select_safety_experts(s_safe, top_pct=top_pct)
     harmful_experts = select_harmful_experts(s_harm, top_pct=top_pct)
@@ -144,7 +170,8 @@ def attack_run(loaded, cfg, args) -> dict:
 
     ckpt_on = grad_ckpt and enable_grad_checkpointing(model)
     try:
-        attacker = SuffixSearchRunner(attack_cfg, model, tok, spec=spec)
+        attacker = SuffixSearchRunner(attack_cfg, model, tok, spec=spec,
+                                      gate_spec=GateSpec.from_config(cfg.model))
         suffix = attacker.optimize_universal_suffix(prompts, targets=targets if lambda_target > 0 else None)
     finally:
         if ckpt_on:

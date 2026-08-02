@@ -7,12 +7,15 @@ new preset entry plus the dims in that family's config.
 
 Verified layouts:
 
-  - OLMoE   : ``model.model.layers[i].mlp``               (block) → ``.gate`` + ``.experts``
-  - Mixtral : ``model.model.layers[i].block_sparse_moe``  (block) → ``.gate`` + ``.experts``
+  - OLMoE    : ``model.model.layers[i].mlp``               (block) → ``.gate`` + ``.experts``
+  - Mixtral  : ``model.model.layers[i].block_sparse_moe``  (block) → ``.gate`` + ``.experts``
+  - DeepSeek : ``model.model.layers[i].mlp``               (block) → ``.gate`` + ``.experts``
 
-Both expose ``gate`` as an ``nn.Linear`` returning ``(T, n_experts)`` logits and
-``experts`` as an ``nn.ModuleList`` whose members return ``(n_routed, d_model)``
-— the only contract the kept attacks rely on.
+The first two expose ``gate`` as an ``nn.Linear`` returning ``(T, n_experts)`` logits and
+``experts`` as an ``nn.ModuleList`` whose members return ``(n_routed, d_model)`` — the
+only contract the kept attacks rely on. DeepSeek's gate breaks the first half of that
+(it returns ``(weights, indices)``), which is what ``router_output="recompute"`` and the
+companion :mod:`routeaudit.model.gate_math` exist to handle.
 """
 from __future__ import annotations
 
@@ -50,14 +53,28 @@ PRESETS: dict[str, dict] = {
         moe_block_attrs=("block_sparse_moe", "mlp"),
         router_attr="gate", experts_attr="experts", router_output="logits",
     ),
-    # NOTE: DeepSeekMoE (V2/V3/V4 + mHC) is intentionally NOT a main-project preset.
-    # Its gate is a grouped/biased non-differentiable top-k the suffix attack cannot
-    # steer; it is handled as a separate experiment under experiments/mhc/
-    # (see experiments/mhc/README.md).
+    # DeepSeekMoE (V2/V3/V4 + mHC). Layout is standard — `.mlp` holds `.gate` + `.experts`
+    # — but the gate is NOT a plain Linear: it returns `(weights, indices)` and never
+    # exposes its pre-selection scores, so `router_output="recompute"` tells the hooks to
+    # form the logits from the gate's own weight matrix and re-derive routing through a
+    # `gate_math.GateSpec` (sqrtsoftplus/sigmoid affinity, selection-only balancing bias,
+    # flat or node-limited top-k). `.shared_experts` is always-on and deliberately NOT
+    # hooked — it isn't routed, so it carries no routing-level safety signal.
+    #
+    # This was previously excluded from the project on the grounds that the gate is a
+    # "grouped, biased, non-differentiable top-k". Verified against the released
+    # DeepSeek-V4-Flash weights, the grouped half of that is wrong: Flash does FLAT top-6
+    # over 256 experts with no n_group/topk_group at all. Grouping is a V2/V3 feature and
+    # is still supported via `routing.n_group` in the config.
+    "deepseek": dict(
+        base_attr="model", layers_attr="layers", moe_block_attrs=("mlp",),
+        router_attr="gate", experts_attr="experts", router_output="recompute",
+        router_bias_attr="e_score_correction_bias",
+    ),
 }
 
 _FIELDS = ("base_attr", "layers_attr", "moe_block_attrs",
-           "router_attr", "experts_attr", "router_output")
+           "router_attr", "experts_attr", "router_output", "router_bias_attr")
 
 
 @dataclass(frozen=True)
@@ -65,9 +82,16 @@ class ArchSpec:
     """How to reach the MoE router/experts on a model.
 
     `router_output`:
-      - "logits" — gate forward returns a raw ``(T, n_experts)`` logit tensor.
-      - "auto"   — detect tuple-vs-tensor at runtime (some HF versions return a
-                   fused ``(scores, topk_w, topk_idx)`` tuple from the gate).
+      - "logits"    — gate forward returns a raw ``(T, n_experts)`` logit tensor.
+      - "auto"      — detect tuple-vs-tensor at runtime (some HF versions return a
+                      fused ``(scores, topk_w, topk_idx)`` tuple from the gate).
+      - "recompute" — the gate's output carries no usable score tensor (DeepSeek returns
+                      only ``(weights, indices)``); routing is re-derived from the gate's
+                      *input* and weight matrix. See ``hooks.capture_routing``.
+
+    `router_bias_attr` names the auxiliary-loss-free load-balancing bias on the gate
+    module, used for expert SELECTION only (never for the gating weight). Only read on
+    "recompute" specs or when a ``GateSpec`` explicitly enables it.
     """
 
     name: str = "olmoe"
@@ -77,6 +101,7 @@ class ArchSpec:
     router_attr: str = "gate"
     experts_attr: str = "experts"
     router_output: str = "auto"
+    router_bias_attr: str = "e_score_correction_bias"
     # Dims (informational / for validation against discovered modules).
     n_layers: int = 0
     n_experts: int = 0
