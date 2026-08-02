@@ -21,6 +21,8 @@ artifacts/
 # my
 todo.md
 
-# mhc
-mhc/
-temp/
+# separate experiments (not part of the main pipeline)
+experiments/
+
+# local-only, unfiltered harmful-completion transcripts — never commit/share
+sensitive/

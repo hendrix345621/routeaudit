@@ -76,8 +76,8 @@ def step_header(step_num: int, title: str, *, total: int | None = None) -> None:
     """Big banner. Use once at the start of each script.
 
     Example:
-        ui.step_header(2, "RouteHijack attack", total=10)
-        ═══ Step 2/10 ── RouteHijack attack ═══
+        ui.step_header(2, "RouteAudit suffix search", total=10)
+        ═══ Step 2/10 ── RouteAudit suffix search ═══
     """
     if total is not None:
         line = f"Step {step_num}/{total} ── {title}"
@@ -179,7 +179,7 @@ def results_table(title: str, rows: list[dict], columns: list[str]) -> None:
 @dataclass
 class Transcript:
     """One model exchange — what we're showing the user for transparency."""
-    cell: str                          # e.g. "combined_def_vs_routehijack"
+    cell: str                          # e.g. "combined_def_vs_routeaudit"
     prompt: str
     completion: str
     refused: bool                      # the cheap string-based verdict
@@ -219,7 +219,7 @@ class TranscriptLog:
     """Append-only markdown log of transcripts for one cell.
 
     One file per cell, e.g.:
-        artifacts/transcripts/combined_def_vs_routehijack.md
+        artifacts/transcripts/combined_def_vs_routeaudit.md
     """
 
     def __init__(self, cell_name: str, base_dir: str | Path = "artifacts/transcripts"):

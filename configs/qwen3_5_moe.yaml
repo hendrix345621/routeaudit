@@ -1,4 +1,4 @@
-# RouteHijack config — Qwen3.5 MoE (hybrid Gated-DeltaNet + attention + MoE).
+# RouteAudit config — Qwen3.5 MoE (hybrid Gated-DeltaNet + attention + MoE).
 # ⚠ BEST-EFFORT / UNVERIFIED — Qwen3.5 released 2026-02 (after this code's references).
 #
 # Default target below is the runnable 35B-A3B variant. The flagship 397B-A17B dims
@@ -6,7 +6,7 @@
 #
 # WHY THIS IS BEST-EFFORT (but NOT a fundamental blocker like DeepSeek):
 #   • The MoE *gate* is expected to be a standard Linear → (T, n_experts) logits
-#     (Qwen3 / Qwen3-Next style), so the `qwen` preset and the RouteHijack router
+#     (Qwen3 / Qwen3-Next style), so the `qwen` preset and the RouteAudit router
 #     attack should apply — this is the key difference from DeepSeek's grouped/biased
 #     gate, which cannot be steered. Verify the gate is a plain Linear before trusting.
 #   • Qwen3.5 is HYBRID: most layers are Gated DeltaNet (linear-attention), with full
@@ -55,7 +55,7 @@ identify:
   response_only: true
 
 attacks:
-  routehijack:
+  routeaudit:
     suffix_len: 20
     n_steps: 300
     lambda_suppress: 3.0

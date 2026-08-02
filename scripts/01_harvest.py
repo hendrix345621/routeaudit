@@ -1,7 +1,7 @@
 """Stage 01 — harvest: expert identification (model loaded once).
 
   • Identify: F_l(e|safe), F_l(e|harm), F_l(e|gen) over the contrast pairs (response
-    tokens) → Score_safe / Score_harm → top-pct safety + harmful experts (RouteHijack §5).
+    tokens) → Score_safe / Score_harm → top-pct safety + harmful experts (RouteHijack paper, §5).
 
 Outputs:
   artifacts/safety_experts.json, artifacts/harmful_experts.json
@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import argparse
 
-from routehijack import config as cfg_mod
-from routehijack import ui
-from routehijack.model import load_model
-from routehijack.pipeline import harvest_run
+from routeaudit import config as cfg_mod
+from routeaudit import ui
+from routeaudit.model import load_model
+from routeaudit.pipeline import harvest_run
 
 
 def main():

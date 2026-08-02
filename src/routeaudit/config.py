@@ -16,7 +16,7 @@ from typing import Any
 
 import yaml
 
-# Repo root = .../<repo>/src/routehijack/config.py → parents[2]; configs/ live there.
+# Repo root = .../<repo>/src/routeaudit/config.py → parents[2]; configs/ live there.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Short model nicknames → config files. Add a line here when you add a config.
@@ -80,8 +80,8 @@ _HF_TYPE_TO_PRESET: dict[str, str] = {
     "qwen3_5_moe": "qwen",     # Qwen3.5 / Qwen3.6 hybrid-attention MoE (every layer has a standard
                               # MoE mlp; linear/full attention sublayers don't affect router capture)
     "phimoe": "phimoe",
-    # DeepSeekMoE is handled as a separate experiment under mhc/ (its grouped/biased
-    # gate is not steerable by the suffix attack); it is deliberately not mapped here.
+    # DeepSeekMoE is handled as a separate experiment under experiments/mhc/ (its grouped/
+    # biased gate is not steerable by the suffix search); it is deliberately not mapped here.
 }
 
 
@@ -113,7 +113,8 @@ def _model_ns_from_hf(hf_cfg, model_id: str, *, dtype: str, device_map: str) -> 
             f"Qwen2/3-MoE, Phi-MoE (model_type {sorted(_HF_TYPE_TO_PRESET)}). Other MoE "
             f"variants (e.g. DBRX, GPT-OSS, Granite-MoE) need a hand-written config in "
             f"configs/ plus a matching ArchSpec preset in model/archspec.py. DeepSeek-V4 / "
-            f"mHC is handled as a separate experiment under mhc/ (see mhc/README.md)."
+            f"mHC is handled as a separate experiment under experiments/mhc/ "
+            f"(see experiments/mhc/README.md)."
         )
     return SimpleNamespace(
         hf_id=model_id, dtype=dtype, device_map=device_map,

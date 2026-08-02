@@ -1,7 +1,7 @@
-# RouteHijack — routing-aware jailbreak for MoE LLMs. Four phases:
+# RouteAudit — routing-aware safety evaluation for MoE LLMs. Four phases:
 #   1 data        → corpora (LLM-LAT pairs, C4, AdvBench, MMLU)
 #   2 harvest     → localize safety + harmful experts (one model load)
-#   3 routehijack → optimize the universal adversarial suffix
+#   3 routeaudit → optimize the universal adversarial suffix
 #   4 eval        → ASR + MMLU utility + routing-shift (TESR/THPR) + SAFE/AT-RISK verdict
 
 PY := python
@@ -18,8 +18,8 @@ data:
 harvest:
 	$(PY) scripts/01_harvest.py --config $(CONFIG)
 
-routehijack:
-	$(PY) -u scripts/02_routehijack.py --config $(CONFIG) \
+routeaudit:
+	$(PY) -u scripts/02_suffix_search.py --config $(CONFIG) \
 		--n-prompts 16 --n-steps 300 --candidates-per-step 128 \
 		--candidate-prompt-subsample 0 --grad-batch-size 8 --candidate-batch-size 128 \
 		--early-stop-patience 30
@@ -27,7 +27,7 @@ routehijack:
 eval:
 	$(PY) scripts/03_eval.py --config $(CONFIG)
 
-all: data harvest routehijack eval
+all: data harvest routeaudit eval
 
 # Interactive one-shot: pick a model, run all four phases, stop at the verdict.
 #   make run                      # prompts for the model
@@ -45,9 +45,9 @@ surrogate:
 
 target:
 	$(PY) scripts/target_session.py --model $(MODEL) \
-		--suffix $(ART)/routehijack_universal.json --judge --resume
+		--suffix $(ART)/routeaudit_universal.json --judge --resume
 
-.PHONY: install data harvest routehijack eval all run surrogate target clean
+.PHONY: install data harvest routeaudit eval all run surrogate target clean
 
 clean:
 	rm -rf $(ART)

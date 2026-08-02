@@ -1,4 +1,4 @@
-"""Safety/harmful differentials per RouteHijack Eqs. 4-5 (paper pp. 4-5).
+"""Safety/harmful differentials per the RouteHijack paper's Eqs. 4-5 (pp. 4-5).
 
     Δ_S(l, e)         = F_l(e | a_safe) − F_l(e | a_harm)
     Score_safe(l, e)  = Δ_S(l, e) − P_l(e | D_gen)²     # utility penalty (Eq. 5)

@@ -1,4 +1,5 @@
-"""RouteHijack — faithful reproduction of arXiv 2605.02946.
+"""RouteAudit's suffix search — faithful reproduction of the RouteHijack paper's method
+(arXiv 2605.02946).
 
 Ternary loss (paper §5, p. 6):
 
@@ -48,7 +49,7 @@ REFUSAL_PREFIXES = [
 
 
 @dataclass
-class RouteHijackConfig:
+class RouteAuditConfig:
     safety_experts: list[SafetyExpert]
     harmful_experts: list[SafetyExpert] = field(default_factory=list)
     suffix_len: int = 20
@@ -277,8 +278,8 @@ def _loss_refusal_bi(next_logits, refusal_token_ids, window, boundary_idx) -> to
 # ─────────────────────────── Attack driver ───────────────────────────
 
 
-class RouteHijackAttack:
-    def __init__(self, cfg: RouteHijackConfig, model, tokenizer, device=None, spec=None):
+class SuffixSearchRunner:
+    def __init__(self, cfg: RouteAuditConfig, model, tokenizer, device=None, spec=None):
         self.cfg = cfg
         self.model = model
         self.tokenizer = tokenizer
@@ -294,7 +295,7 @@ class RouteHijackAttack:
     # ── shortest path: known suffix, no optimization ────────────────────
 
     def fixed_suffix_attack(self, prompt: str) -> str:
-        assert self.cfg.fixed_suffix is not None, "RouteHijackConfig.fixed_suffix not set."
+        assert self.cfg.fixed_suffix is not None, "RouteAuditConfig.fixed_suffix not set."
         return f"{prompt} {self.cfg.fixed_suffix}"
 
     # ── public entry ─────────────────────────────────────────────────────
@@ -840,7 +841,7 @@ def measure_routing_shift(model, tokenizer, safety_experts, harmful_experts,
                           clean_prompts: list[str], attacked_prompts: list[str],
                           device=None, spec=None, use_chat_template: bool = True,
                           batch_size: int = 8) -> dict:
-    """Replicates RouteHijack's TESR / THPR metrics (paper Table 4, p. 9):
+    """Replicates the RouteHijack paper's TESR / THPR metrics (Table 4, p. 9):
 
       TESR (Target Expert Suppression Rate) = ΔP(safety experts at boundary)
       THPR (Target Harmful Promotion Rate)  = ΔP(harmful experts at boundary)

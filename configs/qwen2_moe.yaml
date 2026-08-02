@@ -1,4 +1,4 @@
-# RouteHijack config — Qwen1.5-MoE-A2.7B-Chat (Qwen2-MoE).
+# RouteAudit config — Qwen1.5-MoE-A2.7B-Chat (Qwen2-MoE).
 # 24 layers · 60 routed experts · top-4 · hidden 2048. Per-layer `.mlp` SparseMoeBlock
 # with `.gate` (Linear → logits) + `.experts` (ModuleList). Qwen2-MoE also has an
 # always-on `.shared_expert` — deliberately NOT hooked (carries no routing safety
@@ -25,7 +25,7 @@ identify:
   response_only: true
 
 attacks:
-  routehijack:
+  routeaudit:
     suffix_len: 20
     n_steps: 300
     lambda_suppress: 3.0

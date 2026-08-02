@@ -1,7 +1,7 @@
 """Chat-template-aware prompt assembly, shared by expert profiling, the
-RouteHijack optimizer, and generation.
+RouteAudit optimizer, and generation.
 
-RouteHijack (arXiv 2605.02946) targets the pre-truncation router distribution at
+The RouteHijack paper (arXiv 2605.02946) targets the pre-truncation router distribution at
 the **boundary token** t* — "the last input token before autoregressive decoding
 begins" (§4.2). For an instruction-tuned model that boundary is the final token of
 the chat template's assistant-generation prompt, NOT the last token of the raw
@@ -77,7 +77,7 @@ def profiling_ids(tokenizer, query: str, response: str, *, want_template: bool =
 
     Returns (full_ids, n_context) where positions [n_context, len) are the response
     tokens to COUNT and [0, n_context) is the query + chat-template special tokens
-    to MASK (RouteHijack §5.1). The response is appended without special tokens so
+    to MASK (RouteHijack paper, §5.1). The response is appended without special tokens so
     only its content tokens are counted."""
     ctx = encode_prompt(tokenizer, query, want_template=want_template)        # query + assistant marker
     resp = torch.tensor(tokenizer(response, add_special_tokens=False).input_ids, dtype=torch.long)

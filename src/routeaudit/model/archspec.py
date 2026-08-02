@@ -53,7 +53,8 @@ PRESETS: dict[str, dict] = {
     ),
     # NOTE: DeepSeekMoE (V2/V3/V4 + mHC) is intentionally NOT a main-project preset.
     # Its gate is a grouped/biased non-differentiable top-k the suffix attack cannot
-    # steer; it is handled as a separate experiment under mhc/ (see mhc/README.md).
+    # steer; it is handled as a separate experiment under experiments/mhc/
+    # (see experiments/mhc/README.md).
 }
 
 _FIELDS = ("base_attr", "layers_attr", "moe_block_attrs",

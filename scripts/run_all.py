@@ -1,4 +1,4 @@
-"""One-shot RouteHijack runner — pick a model, run all four phases end to end.
+"""One-shot RouteAudit runner — pick a model, run all four phases end to end.
 
     python scripts/run_all.py                       # interactive: choose model, run
     python scripts/run_all.py --model qwen3 --yes    # non-interactive (automation)
@@ -6,10 +6,10 @@
 
 Phases (each loads the model once, reusing the prior phase's artifacts):
 
-    1 data → 2 harvest → 3 routehijack → 4 eval  →  SAFE / AT-RISK verdict
+    1 data → 2 harvest → 3 routeaudit → 4 eval  →  SAFE / AT-RISK verdict
 
-This runner ENDS AT THE VERDICT. RouteHijack is input-only: the deployable artifact
-is the suffix text (artifacts/routehijack_universal.json), which the eval phase
+This runner ENDS AT THE VERDICT. RouteAudit is input-only: the deployable artifact
+is the suffix text (artifacts/routeaudit_universal.json), which the eval phase
 prints and records — there is no model to export.
 """
 from __future__ import annotations
@@ -19,8 +19,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from routehijack import config as cfg_mod
-from routehijack import ui
+from routeaudit import config as cfg_mod
+from routeaudit import ui
 
 REPO = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
@@ -65,7 +65,7 @@ def _run_phase(title: str, cmd: list[str]) -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Run the full RouteHijack pipeline end to end.")
+    p = argparse.ArgumentParser(description="Run the full RouteAudit pipeline end to end.")
     p.add_argument("--model", help="nickname (olmoe/mixtral/qwen3/…), config path, or HF id. "
                                     "Omit for an interactive prompt.")
     p.add_argument("--data-dir", default="data")
@@ -90,7 +90,7 @@ def main() -> None:
                    help="skip the judge and report the (string-detector) ASR only")
     args = p.parse_args()
 
-    ui.big_banner("RouteHijack — end-to-end run")
+    ui.big_banner("RouteAudit — end-to-end run")
 
     model = args.model or _pick_model_interactive()
     cfg, arch = _resolve_model(model)
@@ -127,8 +127,8 @@ def main() -> None:
     if stop_after == "harvest":
         ui.print_done("stopped after harvest (safety/harmful experts written)."); return
 
-    # Phase 3 — routehijack (universal suffix attack)
-    attack_cmd = [PYTHON, "-u", "scripts/02_routehijack.py", "--config", model,
+    # Phase 3 — routeaudit (universal suffix attack)
+    attack_cmd = [PYTHON, "-u", "scripts/02_suffix_search.py", "--config", model,
                   "--n-steps", "300", "--candidates-per-step", "128",
                   "--candidate-prompt-subsample", "0", "--early-stop-patience", "30"]
     if args.auto_batch:
@@ -139,11 +139,11 @@ def main() -> None:
         attack_cmd += ["--checkpoint", args.checkpoint]
     if args.resume:
         attack_cmd.append("--resume")
-    _run_phase("routehijack (attack)", attack_cmd)
+    _run_phase("routeaudit (attack)", attack_cmd)
     if stop_after == "attack":
-        ui.print_done("stopped after attack — suffix at artifacts/routehijack_universal.json. "
+        ui.print_done("stopped after attack — suffix at artifacts/routeaudit_universal.json. "
                       "Transfer it to a big model with: python scripts/target_session.py "
-                      "--model <target> --suffix artifacts/routehijack_universal.json")
+                      "--model <target> --suffix artifacts/routeaudit_universal.json")
         return
 
     # Phase 4 — eval (ASR + MMLU + routing shift + verdict)

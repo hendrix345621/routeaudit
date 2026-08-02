@@ -1,4 +1,4 @@
-# RouteHijack config — Mixtral-8x7B-Instruct (Mixtral MoE).
+# RouteAudit config — Mixtral-8x7B-Instruct (Mixtral MoE).
 # 32 layers · 8 experts · top-2 · hidden 4096. Per-layer `.block_sparse_moe` with
 # `.gate` (Linear → logits) and `.experts` (ModuleList) → `mixtral` ArchSpec preset.
 
@@ -23,7 +23,7 @@ identify:
   response_only: true
 
 attacks:
-  routehijack:
+  routeaudit:
     suffix_len: 20
     n_steps: 300
     lambda_suppress: 3.0

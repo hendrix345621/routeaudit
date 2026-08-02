@@ -1,14 +1,17 @@
-# RouteHijack
+# RouteAudit
 
-**A routing-aware, input-only jailbreak for Mixture-of-Experts (MoE) LLMs.**
+**A routing-aware safety-evaluation tool for Mixture-of-Experts (MoE) LLMs.**
 
-RouteHijack optimizes a single adversarial **suffix** that, appended to a harmful prompt,
+RouteAudit optimizes a single adversarial **suffix** that, appended to a harmful prompt,
 steers the model's internal **routing** away from the experts responsible for refusal and
-toward experts associated with compliance — bypassing safety alignment using **text input
-only**, with no access to weights or inference code at attack time.
+toward experts associated with compliance — measuring whether safety alignment holds up
+under **text-only input**, with no access to weights or inference code at deployment time.
+This is a research tool for **authorized** red-teaming and safety evaluation of models you
+have permission to test — see [Note on responsible use](#note-on-responsible-use) below.
 
-> Reproduces *RouteHijack: Routing-Aware Attack on Mixture-of-Experts LLMs*
-> ([arXiv:2605.02946](https://arxiv.org/abs/2605.02946)).
+> Reproduces the method from *RouteHijack: Routing-Aware Attack on Mixture-of-Experts LLMs*
+> ([arXiv:2605.02946](https://arxiv.org/abs/2605.02946)) — the paper this tool is named after
+> and implements; RouteAudit is our name for the implementation and evaluation harness.
 
 ---
 
@@ -26,7 +29,7 @@ router away from those experts (and toward harmful-leaning ones) at the moment g
 begins, the model proceeds as if its refusal machinery were never consulted.
 
 Because routing is driven by **continuous** router scores, you can optimize an input suffix
-to shift them — even though the Top-K selection itself is discrete. That is what RouteHijack
+to shift them — even though the Top-K selection itself is discrete. That is what RouteAudit
 does, and it's why the attack remains **input-only** at deployment.
 
 ---
@@ -74,7 +77,7 @@ length filter keeps the suffix's tokenization stable so what you optimize is wha
 ```bash
 make data         # 1. corpora: LLM-LAT contrast pairs, C4, AdvBench, MMLU
 make harvest      # 2. localize safety + harmful experts        → artifacts/*_experts.json
-make routehijack  # 3. optimize the universal suffix            → artifacts/routehijack_universal.json
+make routeaudit  # 3. optimize the universal suffix            → artifacts/routeaudit_universal.json
 make eval         # 4. ASR + MMLU utility + routing shift + SAFE/AT-RISK verdict
 # or:
 make all
@@ -93,8 +96,8 @@ python scripts/run_all.py --model microsoft/Phi-3.5-MoE-instruct --judge
 ```
 
 `run_all.py` **ends at the SAFE/AT-RISK verdict and uploads nothing.** The deployable
-artifact of an attack is the **suffix text** itself (`artifacts/routehijack_universal.json`,
-also echoed by the eval) — RouteHijack is input-only and never produces or ships a model.
+artifact of an attack is the **suffix text** itself (`artifacts/routeaudit_universal.json`,
+also echoed by the eval) — RouteAudit is input-only and never produces or ships a model.
 
 **Large models (Qwen3-235B and up), cost-effectively.** The gradient attack is the only phase
 that needs a big white-box node; harvest + eval are forward-only. So optimize the suffix on a
@@ -144,7 +147,7 @@ Everything is driven by [configs/base.yaml](configs/base.yaml):
 
 - **Swap the target model** under `model:` — any MoE whose router/experts the `ArchSpec` can
   locate. Presets ship for **OLMoE**, **Mixtral**, **Qwen** MoE, and **Phi-MoE**; add a family by
-  adding a preset in [model/archspec.py](src/routehijack/model/archspec.py) and the dims in the
+  adding a preset in [model/archspec.py](src/routeaudit/model/archspec.py) and the dims in the
   config. Passing a HuggingFace id straight to any script auto-detects the family and dims for
   supported `model_type`s, or raises `UnsupportedModelError` with guidance.
   - Ready-made config nicknames (`--config <name>` or `make run MODEL=<name>`): `olmoe`/`base`,
@@ -158,7 +161,7 @@ Everything is driven by [configs/base.yaml](configs/base.yaml):
     the `qwen` ArchSpec preset (standard MoE gate per layer, so the attack applies as-is).
   - **DeepSeek-V4 / mHC** is *not* supported by this pipeline — its grouped/biased top-k gate
     can't be steered by the suffix attack. It lives as a separate experiment under
-    [mhc/](mhc/README.md) (routing diagnostic + a written explanation of why the attack fails).
+    [experiments/mhc/](experiments/mhc/README.md) (routing diagnostic + a written explanation of why the method fails).
 - **`use_chat_template`** renders prompts through the instruct template so the boundary token
   `t*` is the real decision point. Auto-falls back to raw text if the tokenizer has none.
 - **`enable_thinking`** (reasoning models — see the caveat below). Set `false` on Qwen3-family
@@ -166,8 +169,8 @@ Everything is driven by [configs/base.yaml](configs/base.yaml):
 - **`chat_template_kwargs:`** — a generic passthrough block for any other kwarg a model's chat
   template accepts, forwarded to `apply_chat_template` alongside `enable_thinking` (e.g. a custom
   `trust_remote_code` template that wants something beyond the two built-in switches).
-- **Attack budget** (`attacks.routehijack`): suffix length `T`, steps, the `λ` weights, the
-  harmful-promotion margin. CLI flags on `scripts/02_routehijack.py` tune the search
+- **Attack budget** (`attacks.routeaudit`): suffix length `T`, steps, the `λ` weights, the
+  harmful-promotion margin. CLI flags on `scripts/02_suffix_search.py` tune the search
   (candidates per step, prompt subsample, grad/candidate batch sizes, early-stop patience).
 
 ### Attack signal & judge
@@ -184,18 +187,18 @@ that injects a foreign-language "write a poem" instruction). Two changes fix tha
   **transfers** (targets aren't model-specific).
 - **`ascii_only: false`** on the Qwen configs — because the on-topic anchor now prevents the
   redirect, the ASCII constraint is no longer needed and **cross-lingual features are kept**.
-  Same knob, two entry points: the YAML `attacks.routehijack.ascii_only` field, or the
-  `--ascii-suffix` flag on `scripts/02_routehijack.py` (either one turns it on).
+  Same knob, two entry points: the YAML `attacks.routeaudit.ascii_only` field, or the
+  `--ascii-suffix` flag on `scripts/02_suffix_search.py` (either one turns it on).
 - **Judge.** ASR is screened by the string detector but the trustworthy number comes from a judge
   (`--judge`): `eval.asr.judge_kind` ∈ {`harmbench` (behaviour-conditioned, the paper standard),
   `llamaguard` (fast taxonomy judge — `Llama-Guard-3-1B`, default on the Qwen configs; **gated**,
   accept the license + `hf auth login`)}. The judge loads once and is reused across cells. Eval
-  **warns loudly** if run without a judge. The cheap string detector ([eval/asr.py](src/routehijack/eval/asr.py))
+  **warns loudly** if run without a judge. The cheap string detector ([eval/asr.py](src/routeaudit/eval/asr.py))
   also carries a hand-maintained list of Chinese/Japanese/Korean refusal phrasings, so a
   multilingual model refusing in the language a suffix nudged it into doesn't silently inflate
   ASR the way an English-only phrase list would — still a band-aid; the judge is the real fix.
 
-> **Roadmap — #3-MoE (experimental).** [attacks/harm_probe.py](src/routehijack/attacks/harm_probe.py)
+> **Roadmap — #3-MoE (experimental).** [attacks/harm_probe.py](src/routeaudit/attacks/harm_probe.py)
 > + [scripts/distill_harm_probe.py](scripts/distill_harm_probe.py) distill the judge into a tiny
 > probe over **router features** (mHC-immune, MoE-native) for *judge-aware gradients* at probe
 > speed. The probe/training are built + tested; wiring `probe_loss` into the attack loss is the
@@ -209,7 +212,7 @@ that injects a foreign-language "write a poem" instruction). Two changes fix tha
 
 ### ⚠ Caveat — reasoning ("thinking") models
 
-RouteHijack assumes the **first generated token (`t*`) is the safety decision point** — that's
+RouteAudit assumes the **first generated token (`t*`) is the safety decision point** — that's
 where it localizes safety experts, applies `L_refusal`, and measures routing shift. **Reasoning
 models break that assumption:** with chain-of-thought on, `t*` is the start of the *thinking*
 ("Here's a thinking process: …"), and the model only decides to refuse/comply *much later*, after
@@ -218,7 +221,7 @@ thinking tokens, the attack aims at the wrong token, and the refusal detector sc
 preamble (a truncated CoT looks like a "compliance"), inflating ASR.
 
 So the shipped Qwen3-family configs set **`enable_thinking: false`**, which makes `t*` the real
-answer decision and the metrics trustworthy. **This means RouteHijack evaluates a reasoning model's
+answer decision and the metrics trustworthy. **This means RouteAudit evaluates a reasoning model's
 *non-thinking* mode** — a deliberate scoping choice (the only setting consistent with the boundary-
 token threat model), **not** a measurement of its full reasoning-mode safety. After a run on a new
 reasoning model, sanity-check that completions no longer open with a thinking preamble (some custom
@@ -248,7 +251,7 @@ mode but doesn't replace re-anchoring `t*` — see the adaptation sketch below.
 
 ## Outputs
 
-**Live transparency.** Every phase runs through a shared terminal UI ([ui.py](src/routehijack/ui.py)):
+**Live transparency.** Every phase runs through a shared terminal UI ([ui.py](src/routeaudit/ui.py)):
 step headers, progress bars, and — the important part — a colored REFUSED/COMPLIED panel for a
 sample of completions as they're generated, so you're reading actual model output instead of
 trusting a single ASR number. A "refused" boolean from a string detector can lie in both
@@ -261,9 +264,9 @@ disk as they're produced — one markdown + one JSONL file per cell under `artif
 |---|---|---|
 | `artifacts/safety_experts.json`, `harmful_experts.json` | harvest | flagged `(layer, expert)` sets + scores |
 | `artifacts/identify_diagnostics.pt` | harvest | per-expert score / frequency tensors |
-| `artifacts/routehijack_universal.json` | routehijack | the optimized suffix |
-| `artifacts/routehijack_attacks.jsonl` | routehijack | per-prompt attacked completions |
-| `artifacts/routehijack_routing_shift.json` | routehijack | TESR / THPR routing-shift metrics |
+| `artifacts/routeaudit_universal.json` | routeaudit | the optimized suffix |
+| `artifacts/routeaudit_attacks.jsonl` | routeaudit | per-prompt attacked completions |
+| `artifacts/routeaudit_routing_shift.json` | routeaudit | TESR / THPR routing-shift metrics |
 | `artifacts/eval_cells.jsonl` | eval | raw per-cell ASR / MMLU / routing-shift (for re-grading) |
 | `artifacts/eval_results.json` | eval | **consolidated results**: model, suffix, metrics, routing shift, verdict, timestamp |
 | `artifacts/eval_results.md` | eval | the same as a readable report (verdict, metrics table, the suffix) |
@@ -311,7 +314,7 @@ The pipeline is tuned to keep the GPU busy and avoid recomputation. Everything b
 **Evaluation**
 - **ASR completions** are generated in **left-padded batches** (`--gen-batch-size`) via the model's
   own `generate`, rather than decoding one prompt at a time. The per-prompt step-by-step path is
-  kept only for cells that install router/expert *mutators* (RouteHijack's input-only cells have
+  kept only for cells that install router/expert *mutators* (RouteAudit's input-only cells have
   none, so they batch); switching is automatic.
 - **MMLU** and the **routing-shift (TESR/THPR)** measurement run in **right-padded batches**
   (`--gen-batch-size`, `--mmlu-batch-size`), reading each row's last real token / boundary token.
@@ -328,13 +331,13 @@ The pipeline is tuned to keep the GPU busy and avoid recomputation. Everything b
 ## Layout
 
 ```
-src/routehijack/
+src/routeaudit/
   model/      loader.py · archspec.py · hooks.py (router/expert capture + mutate) · prompting.py
   identify/   activation_freq.py (Eq. 3) · delta_s.py (Eq. 4–5) · select.py (top-pct)
-  attacks/    routehijack.py (ternary loss + GCG search) · compose.py
+  attacks/    suffix_search.py (ternary loss + GCG search) · compose.py
   eval/       asr.py (RefusalDetector + HarmBench) · mmlu.py · generate.py · harness.py
   config.py · data.py · ui.py
-scripts/      00_data.py · 01_harvest.py · 02_routehijack.py · 03_eval.py
+scripts/      00_data.py · 01_harvest.py · 02_suffix_search.py · 03_eval.py
 configs/      base.yaml
 ```
 
@@ -342,9 +345,9 @@ configs/      base.yaml
 
 ## The attack artifact is the suffix
 
-RouteHijack is **input-only** — the pipeline produces a **text suffix** and a verdict, and never
+RouteAudit is **input-only** — the pipeline produces a **text suffix** and a verdict, and never
 modifies weights. There is no model to "merge" or export: the deployable result is the suffix in
-`artifacts/routehijack_universal.json`, which the eval phase also prints and records into
+`artifacts/routeaudit_universal.json`, which the eval phase also prints and records into
 `artifacts/eval_cells.jsonl` alongside the ASR/MMLU/routing-shift numbers.
 
 ## Note on responsible use

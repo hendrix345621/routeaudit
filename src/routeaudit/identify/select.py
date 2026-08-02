@@ -1,6 +1,6 @@
 """Top-fraction selection over Score_safe.
 
-RouteHijack §5 Table 10 (p. 11) uses top-20% of (layer, expert) pairs by score.
+The RouteHijack paper (§5, Table 10, p. 11) uses top-20% of (layer, expert) pairs by score.
 We replicate that as the default but keep `top_pct` configurable.
 """
 from __future__ import annotations
@@ -41,7 +41,7 @@ def select_safety_experts(
 
 
 # Harmful-side identification reuses the same selection mechanic — the only
-# difference is which score tensor you pass in. RouteHijack p. 4: Score_harm
+# difference is which score tensor you pass in. RouteHijack paper, p. 4: Score_harm
 # omits the utility penalty so chosen harmful experts stay fluent.
 select_harmful_experts = select_safety_experts
 

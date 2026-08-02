@@ -144,7 +144,7 @@ def _report_placement(model) -> None:
             f"model is OFFLOADED across devices ({summary}). `device_map: auto` "
             "spilled part of the model off the GPU, so every forward pass copies "
             "activations over PCIe — this is the usual cause of 10-100× slow "
-            "harvest / routehijack stages. Fix: fit the model on one GPU (a 24 GB+ "
+            "harvest / routeaudit stages. Fix: fit the model on one GPU (a 24 GB+ "
             "card for OLMoE-1B-7B), or set `model.device_map` to a single device "
             "like \"cuda:0\". A bigger RAM disk does NOT help — this is VRAM, not disk."
         )

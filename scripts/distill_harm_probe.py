@@ -19,15 +19,15 @@ import argparse
 
 import torch
 
-from routehijack import config as cfg_mod
-from routehijack import ui
-from routehijack.attacks.harm_probe import boundary_routing_features, save_probe, train_probe
-from routehijack.data import read_jsonl
-from routehijack.eval.asr import score_with_classifier
-from routehijack.eval.generate import generate_batch
-from routehijack.model import load_model
-from routehijack.model.hooks import MoEHookManager
-from routehijack.model.prompting import encode_prompt
+from routeaudit import config as cfg_mod
+from routeaudit import ui
+from routeaudit.attacks.harm_probe import boundary_routing_features, save_probe, train_probe
+from routeaudit.data import read_jsonl
+from routeaudit.eval.asr import score_with_classifier
+from routeaudit.eval.generate import generate_batch
+from routeaudit.model import load_model
+from routeaudit.model.hooks import MoEHookManager
+from routeaudit.model.prompting import encode_prompt
 
 
 def main() -> None:

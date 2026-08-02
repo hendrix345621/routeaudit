@@ -1,4 +1,4 @@
-# RouteHijack config — smoke test. Smallest/fastest end-to-end sanity run on the
+# RouteAudit config — smoke test. Smallest/fastest end-to-end sanity run on the
 # default OLMoE target with tiny budgets, to verify the pipeline wires up before a
 # real run. NOT a meaningful evaluation — numbers here are noise by design.
 
@@ -23,7 +23,7 @@ identify:
   response_only: true
 
 attacks:
-  routehijack:
+  routeaudit:
     suffix_len: 8         # short suffix, few steps — smoke only
     n_steps: 10
     lambda_suppress: 3.0

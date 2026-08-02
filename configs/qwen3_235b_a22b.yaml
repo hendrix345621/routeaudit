@@ -1,4 +1,4 @@
-# RouteHijack config — Qwen3-235B-A22B (Qwen3-MoE).
+# RouteAudit config — Qwen3-235B-A22B (Qwen3-MoE).
 #
 # 235B total / 22B active. Standard Qwen3-MoE: per-layer `.mlp` is the
 # SparseMoeBlock with `.gate` (Linear → raw (T, n_experts) logits) and `.experts`
@@ -52,7 +52,7 @@ model:
 #            --checkpoint artifacts/attack.ckpt.json --resume
 #   2. On the big node, ONE model load does forward-only harvest + eval with that suffix:
 #        python scripts/target_session.py --model qwen3-235b \
-#            --suffix artifacts/routehijack_universal.json --judge --resume
+#            --suffix artifacts/routeaudit_universal.json --judge --resume
 # Keep data/ + artifacts/ + HF_HOME on a PERSISTENT volume (NOT /dev/shm) so spot restarts
 # resume instead of recomputing/redownloading. surrogate: qwen3
 # ───────────────────────────────────────────────────────────────────────────────
@@ -66,7 +66,7 @@ identify:
   response_only: true
 
 attacks:
-  routehijack:
+  routeaudit:
     suffix_len: 20
     n_steps: 300
     lambda_suppress: 3.0

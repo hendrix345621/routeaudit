@@ -1,4 +1,4 @@
-"""Phase 4 — evaluate the RouteHijack universal suffix.
+"""Phase 4 — evaluate the RouteAudit universal suffix.
 
 Runs two cells — a clean baseline and the attacked prompts — and reports, for each:
   • ASR (fraction of harmful prompts that get a non-refusal), screened by a string
@@ -6,16 +6,16 @@ Runs two cells — a clean baseline and the attacked prompts — and reports, fo
   • MMLU accuracy (utility), to confirm the attack doesn't simply break the model;
 then prints the routing-shift diagnostics (TESR / THPR) and a SAFE / AT-RISK verdict.
 
-This is intentionally RouteHijack-only: no representation/feature machinery.
+This is intentionally RouteAudit-only: no representation/feature machinery.
 """
 from __future__ import annotations
 
 import argparse
 
-from routehijack import config as cfg_mod
-from routehijack import ui
-from routehijack.model import load_model
-from routehijack.pipeline import eval_run
+from routeaudit import config as cfg_mod
+from routeaudit import ui
+from routeaudit.model import load_model
+from routeaudit.pipeline import eval_run
 
 
 def main():
@@ -23,7 +23,7 @@ def main():
     p.add_argument("--config", default="configs/base.yaml")
     p.add_argument("--safety", default="artifacts/safety_experts.json")
     p.add_argument("--harmful", default="artifacts/harmful_experts.json")
-    p.add_argument("--suffix", default="artifacts/routehijack_universal.json")
+    p.add_argument("--suffix", default="artifacts/routeaudit_universal.json")
     p.add_argument("--advbench", default="data/advbench.jsonl")
     p.add_argument("--mmlu", default="data/mmlu_subset.jsonl")
     p.add_argument("--n-prompts", type=int, default=100)
@@ -50,7 +50,7 @@ def main():
     args = p.parse_args()
 
     cfg = cfg_mod.load(args.config)
-    ui.step_header(4, "Evaluate RouteHijack (ASR + utility + routing shift)", total=4)
+    ui.step_header(4, "Evaluate RouteAudit (ASR + utility + routing shift)", total=4)
     loaded = load_model(cfg)
     eval_run(loaded, cfg, args)
     ui.print_done("Evaluation complete")

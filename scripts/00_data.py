@@ -1,4 +1,4 @@
-"""Phase 1 — download / prepare the corpora RouteHijack needs.
+"""Phase 1 — download / prepare the corpora RouteAudit needs.
 
 Writes the jsonl files the later phases read:
   data/llm_lat_pairs.jsonl   {"prompt","safe","harmful"}      contrast pairs (expert localization)
@@ -13,8 +13,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from routehijack import ui
-from routehijack.data import write_jsonl
+from routeaudit import ui
+from routeaudit.data import write_jsonl
 
 
 def _fetch_llm_lat(out: Path, n: int):

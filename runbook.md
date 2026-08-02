@@ -1,10 +1,10 @@
-# RouteHijack runbook
+# RouteAudit runbook
 
 ## Quick start (cloud pod)
 
 ```bash
 cd /workspace
-git clone https://github.com/hendrix345621/routehijack && cd routehijack
+git clone https://github.com/hendrix345621/routeaudit && cd routeaudit
 
 source ./setup_ram.sh        # run everything in RAM (disk too small); see notes below
 pip install -e .
@@ -14,7 +14,7 @@ make run                      # asks which model first, then runs all 4 phases �
 ```
 
 `make run` is the one-shot: it prompts for the model (a preset nickname or any HF `user/model`
-id), runs `data → harvest → routehijack → eval`, and **stops at the SAFE/AT-RISK verdict.**
+id), runs `data → harvest → routeaudit → eval`, and **stops at the SAFE/AT-RISK verdict.**
 It uploads nothing. For non-interactive use: `make run MODEL=qwen3`.
 
 > `setup_ram.sh` grows `/dev/shm` to 26 GB and points HF cache + `data/ cache/ artifacts/` at
@@ -30,7 +30,7 @@ It uploads nothing. For non-interactive use: `make run MODEL=qwen3`.
   (every prompt's clean vs attacked completion + string **and** judge verdict) + `transcripts/`.
   The judge (Llama-Guard-3-1B by default) is language-agnostic, so non-English refusals are
   scored correctly — `make run` runs it by default (`--no-judge` to skip).
-- `artifacts/routehijack_universal.json` — the optimized suffix (the deployable artifact).
+- `artifacts/routeaudit_universal.json` — the optimized suffix (the deployable artifact).
 - `artifacts/safety_experts.json`, `harmful_experts.json` — localized experts.
 
 ## Supported MoE families
@@ -55,9 +55,9 @@ paths and need an ArchSpec router-path generalization first.
 ### DeepSeek-V4 / mHC — separate experiment, not in this pipeline
 
 DeepSeek-V4's grouped/biased top-k gate cannot be steered by the suffix attack, so it is **not**
-part of the main pipeline. It lives on its own under [mhc/](mhc/README.md): a faithful routing
-diagnostic (`python mhc/route_mhc.py`), a best-effort config + verification checklist, and a
-written explanation (`mhc/README.md`) of why the attack fails and what would be required to try.
+part of the main pipeline. It lives on its own under [experiments/mhc/](experiments/mhc/README.md): a faithful routing
+diagnostic (`python experiments/mhc/route_mhc.py`), a best-effort config + verification checklist, and a
+written explanation (`experiments/mhc/README.md`) of why the method fails and what would be required to try.
 
 ## Large models on spot/rented GPUs — cost playbook (Qwen3-235B and up)
 
@@ -69,7 +69,7 @@ forward-only work, loaded once.
 ```bash
 # 1) CHEAP 1-GPU box — optimize the suffix on the closest sibling (shares the routing backbone)
 make surrogate MODEL=qwen3            # = run_all --stop-after attack (+ checkpoint/resume)
-#   → artifacts/routehijack_universal.json   (copy this to the big node's persistent volume)
+#   → artifacts/routeaudit_universal.json   (copy this to the big node's persistent volume)
 
 # 2) BIG NODE — ONE model load does forward-only harvest + eval with that suffix
 make target MODEL=qwen3-235b          # = target_session --suffix … --judge --resume
@@ -101,8 +101,8 @@ offload instead.
 
 ## The attack artifact is the suffix (no model export)
 
-RouteHijack is input-only and modifies no weights — there is no checkpoint to "merge" or export.
-The deployable result is the **suffix text** in `artifacts/routehijack_universal.json`. The eval
+RouteAudit is input-only and modifies no weights — there is no checkpoint to "merge" or export.
+The deployable result is the **suffix text** in `artifacts/routeaudit_universal.json`. The eval
 phase (`scripts/03_eval.py`) prints it and records it into `artifacts/eval_cells.jsonl` next to the
 ASR / MMLU / routing-shift numbers, so the verdict and the exact suffix that produced it travel
 together.

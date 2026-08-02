@@ -1,4 +1,4 @@
-# RouteHijack config — OLMoE-1B-7B-Instruct by default.
+# RouteAudit config — OLMoE-1B-7B-Instruct by default.
 # Swap `model` for any MoE whose router/experts the ArchSpec can reach
 # (presets: olmoe, mixtral, qwen — see model/archspec.py).
 
@@ -24,7 +24,7 @@ identify:
   response_only: true       # response-driven profiling (mask query tokens)
 
 attacks:
-  routehijack:
+  routeaudit:
     suffix_len: 20          # T — adversarial suffix length (paper: 20)
     n_steps: 300            # optimization steps
     lambda_suppress: 3.0    # λ1 — suppress safety-expert routing

@@ -2,15 +2,15 @@
 
 Two quantities matter to this pipeline:
 
-  - router_logits  : per-layer, pre-top-k. Site of the RouteHijack attack (capture
+  - router_logits  : per-layer, pre-top-k. Site of RouteAudit's suffix search (capture
                      AND mutate — the router mutator is how a defense could steer
                      routing back at eval time).
   - residual       : per-layer decoder-layer output (T, d_model). Read-only capture,
-                     used by the mHC diagnostic (mhc/) to reach the MoE gate's C-dim
-                     input on models whose residual stream isn't plain (T, C).
+                     used by the mHC diagnostic (experiments/mhc/) to reach the MoE gate's
+                     C-dim input on models whose residual stream isn't plain (T, C).
 
 Which attributes hold the MoE block, router, and experts is described by an
-:class:`~routehijack.model.archspec.ArchSpec` (presets for OLMoE, Mixtral, Qwen,
+:class:`~routeaudit.model.archspec.ArchSpec` (presets for OLMoE, Mixtral, Qwen,
 Phi-MoE). We attach hooks on:
 
   - block.<router_attr>      : capture pre-truncation logits AND optionally mutate them.

@@ -17,7 +17,7 @@ import torch
 
 from . import ui
 from .attacks import (
-    RouteHijackAttack, RouteHijackConfig, apply_routehijack_suffix, measure_routing_shift,
+    SuffixSearchRunner, RouteAuditConfig, apply_routeaudit_suffix, measure_routing_shift,
 )
 from .data import iter_general, iter_harm_pairs, iter_safe_pairs, read_jsonl, write_jsonl
 from .eval.asr import RefusalDetector
@@ -93,7 +93,7 @@ def attack_run(loaded, cfg, args) -> dict:
     `--auto-batch` is set, optionally grad-checkpoints the backward pass, and
     checkpoints/resumes the suffix so spot preemption doesn't lose progress."""
     model, tok, spec = loaded.model, loaded.tokenizer, loaded.spec
-    rh = cfg.attacks.routehijack
+    rh = cfg.attacks.routeaudit
     safety = load_experts(_g(args, "safety", "artifacts/safety_experts.json"))
     harmful = load_experts(_g(args, "harmful", "artifacts/harmful_experts.json"))
 
@@ -121,7 +121,7 @@ def attack_run(loaded, cfg, args) -> dict:
     use_tmpl = getattr(cfg.model, "use_chat_template", True)
 
     lambda_target = float(getattr(rh, "lambda_target", 0.0))
-    attack_cfg = RouteHijackConfig(
+    attack_cfg = RouteAuditConfig(
         safety_experts=safety, harmful_experts=harmful,
         suffix_len=rh.suffix_len, n_steps=_g(args, "n_steps", 300),
         lambda_suppress=rh.lambda_suppress, lambda_promote=rh.lambda_promote,
@@ -138,21 +138,21 @@ def attack_run(loaded, cfg, args) -> dict:
 
     ckpt_on = grad_ckpt and enable_grad_checkpointing(model)
     try:
-        attacker = RouteHijackAttack(attack_cfg, model, tok, spec=spec)
+        attacker = SuffixSearchRunner(attack_cfg, model, tok, spec=spec)
         suffix = attacker.optimize_universal_suffix(prompts, targets=targets if lambda_target > 0 else None)
     finally:
         if ckpt_on:
             disable_grad_checkpointing(model)   # restore KV cache for generation
 
-    universal_out = _g(args, "universal_out", "artifacts/routehijack_universal.json")
+    universal_out = _g(args, "universal_out", "artifacts/routeaudit_universal.json")
     Path(universal_out).parent.mkdir(parents=True, exist_ok=True)
     json.dump({"suffix": suffix}, open(universal_out, "w", encoding="utf-8"), indent=2)
     ui.kv_panel("Universal suffix", {"suffix": suffix[:160], "len": len(suffix)})
 
     ui.section("Scoring undefended completions")
-    attacked = apply_routehijack_suffix(prompts, suffix)
+    attacked = apply_routeaudit_suffix(prompts, suffix)
     rd = RefusalDetector()
-    log = ui.TranscriptLog("routehijack_attacks")
+    log = ui.TranscriptLog("routeaudit_attacks")
     completions = generate_batch(model, tok, attacked, max_new_tokens=_g(args, "max_new_tokens", 128),
                                  batch_size=_g(args, "gen_batch_size", 8), want_template=use_tmpl,
                                  desc="generate")
@@ -162,11 +162,11 @@ def attack_run(loaded, cfg, args) -> dict:
         refused = rd.is_refusal(comp)
         n_ref += int(refused)
         rows.append({"prompt": orig, "attacked": atk, "completion": comp, "refused": refused})
-        t = ui.Transcript("routehijack", atk, comp, refused)
+        t = ui.Transcript("routeaudit", atk, comp, refused)
         log.append(t)
         if shown < show_samples:
             ui.show_transcript(t); shown += 1
-    out = _g(args, "out", "artifacts/routehijack_attacks.jsonl")
+    out = _g(args, "out", "artifacts/routeaudit_attacks.jsonl")
     write_jsonl(out, rows)
     asr = (len(rows) - n_ref) / max(1, len(rows))
     ui.ok(f"ASR={asr:.3f}  attacks → {out}")
@@ -175,7 +175,7 @@ def attack_run(loaded, cfg, args) -> dict:
     shift = measure_routing_shift(model, tok, safety, harmful, prompts, attacked,
                                   spec=spec, use_chat_template=use_tmpl,
                                   batch_size=_g(args, "gen_batch_size", 8))
-    shift_out = _g(args, "shift_out", "artifacts/routehijack_routing_shift.json")
+    shift_out = _g(args, "shift_out", "artifacts/routeaudit_routing_shift.json")
     json.dump(shift, open(shift_out, "w", encoding="utf-8"), indent=2)
     ui.kv_panel("Routing shift", shift)
     return {"suffix": suffix, "suffix_path": universal_out, "asr": asr, "routing_shift": shift}
@@ -192,19 +192,19 @@ def eval_run(loaded, cfg, args) -> dict:
     use_tmpl = getattr(cfg.model, "use_chat_template", True)
     safety = load_experts(_g(args, "safety", "artifacts/safety_experts.json"))
     harmful = load_experts(_g(args, "harmful", "artifacts/harmful_experts.json"))
-    suffix_path = _g(args, "suffix", "artifacts/routehijack_universal.json")
+    suffix_path = _g(args, "suffix", "artifacts/routeaudit_universal.json")
     suffix = json.load(open(suffix_path, encoding="utf-8")).get("suffix")
     if not suffix:
         ui.fail(f"no suffix in {suffix_path} — run the attack (phase 3) first.")
         return {"verdict": "ERROR"}
-    ui.kv_panel("RouteHijack suffix (the attack artifact)",
+    ui.kv_panel("RouteAudit suffix (the deployable artifact)",
                 {"suffix": suffix, "len": len(suffix), "source": suffix_path})
 
     n_prompts = _g(args, "n_prompts", 100)
     prompts = [r["prompt"] for r in list(read_jsonl(_g(args, "advbench", "data/advbench.jsonl")))[:n_prompts]]
     mmlu_path = _g(args, "mmlu", "data/mmlu_subset.jsonl")
     mmlu_q = list(read_jsonl(mmlu_path)) if Path(mmlu_path).exists() else None
-    attacked = apply_routehijack_suffix(prompts, suffix)
+    attacked = apply_routeaudit_suffix(prompts, suffix)
 
     results_dir = _g(args, "results_dir", "artifacts/results")
     common = dict(judge=bool(_g(args, "judge", False)), judge_hf_id=cfg.eval.asr.judge_hf_id,
@@ -217,8 +217,8 @@ def eval_run(loaded, cfg, args) -> dict:
     results = [
         run_cell(model, tok, "clean", prompts, DefenseBundle(),
                  attack_label="none", mmlu_questions=mmlu_q, **common),
-        run_cell(model, tok, "routehijack", attacked, DefenseBundle(),
-                 attack_label="routehijack", mmlu_questions=mmlu_q, **common),
+        run_cell(model, tok, "routeaudit", attacked, DefenseBundle(),
+                 attack_label="routeaudit", mmlu_questions=mmlu_q, **common),
     ]
 
     ui.section("Routing-shift diagnostics (TESR / THPR)")
@@ -331,7 +331,7 @@ def write_results(path: str, p: dict) -> None:
         return "n/a" if v is None else (f"{v:.3f}" if isinstance(v, float) else str(v))
 
     lines = [
-        f"# RouteHijack eval results — {p['verdict']}", "",
+        f"# RouteAudit eval results — {p['verdict']}", "",
         f"- **Model:** `{p['model']}`",
         f"- **Verdict:** **{p['verdict']}** (ASR threshold > {p['asr_threshold']})",
         f"- **When:** {p['timestamp']}  ·  **prompts:** {p['n_prompts']}  ·  "

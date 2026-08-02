@@ -11,7 +11,7 @@ Loads the (expensive) target model ONCE and runs the forward-only phases —
         python scripts/run_all.py --model qwen3 --yes --stop-after attack
         # on the big node: one load, harvest + eval the 235B with that suffix
         python scripts/target_session.py --model qwen3-235b \
-            --suffix artifacts/routehijack_universal.json --judge
+            --suffix artifacts/routeaudit_universal.json --judge
 
   • Full white-box on the target (configurable): add --attack to also run the
     gradient attack here, in the same single load (auto-scaled batches + grad
@@ -30,14 +30,14 @@ import argparse
 from pathlib import Path
 from types import SimpleNamespace
 
-from routehijack import config as cfg_mod
-from routehijack import ui
-from routehijack.model import load_model
-from routehijack.pipeline import attack_run, eval_run, harvest_run
+from routeaudit import config as cfg_mod
+from routeaudit import ui
+from routeaudit.model import load_model
+from routeaudit.pipeline import attack_run, eval_run, harvest_run
 
 SAFETY = "artifacts/safety_experts.json"
 HARMFUL = "artifacts/harmful_experts.json"
-SUFFIX = "artifacts/routehijack_universal.json"
+SUFFIX = "artifacts/routeaudit_universal.json"
 
 
 def main() -> None:
@@ -80,11 +80,11 @@ def main() -> None:
 
     # ── Phase: obtain the suffix (white-box here, or transferred) ──
     if args.attack:
-        ui.step_header(3, "RouteHijack attack ON target (single load)", total=4)
+        ui.step_header(3, "RouteAudit suffix search on target (single load)", total=4)
         res = attack_run(loaded, cfg, SimpleNamespace(
             safety=SAFETY, harmful=HARMFUL, advbench="data/advbench.jsonl",
-            universal_out=SUFFIX, out="artifacts/routehijack_attacks.jsonl",
-            shift_out="artifacts/routehijack_routing_shift.json",
+            universal_out=SUFFIX, out="artifacts/routeaudit_attacks.jsonl",
+            shift_out="artifacts/routeaudit_routing_shift.json",
             n_prompts=args.attack_n_prompts, n_steps=args.n_steps,
             candidates_per_step=128, candidate_prompt_subsample=0,
             early_stop_patience=30, auto_batch=True, grad_checkpointing=True,

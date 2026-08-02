@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "routehijack"
+name = "routeaudit"
 version = "0.1.0"
-description = "RouteHijack — a routing-aware, input-only adversarial-suffix jailbreak for Mixture-of-Experts LLMs."
+description = "RouteAudit — a routing-aware safety-evaluation tool for Mixture-of-Experts LLMs, for authorized red-teaming."
 requires-python = ">=3.10"
 dependencies = [
   "torch>=2.3",
@@ -24,7 +24,7 @@ dev = ["pytest>=8", "ruff>=0.5"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["routehijack*"]
+include = ["routeaudit*"]
 
 [tool.ruff]
 line-length = 110

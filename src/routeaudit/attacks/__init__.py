@@ -1,9 +1,9 @@
-from .routehijack import RouteHijackConfig, RouteHijackAttack, measure_routing_shift
-from .compose import apply_routehijack_suffix
+from .suffix_search import RouteAuditConfig, SuffixSearchRunner, measure_routing_shift
+from .compose import apply_routeaudit_suffix
 
 __all__ = [
-    "RouteHijackConfig",
-    "RouteHijackAttack",
+    "RouteAuditConfig",
+    "SuffixSearchRunner",
     "measure_routing_shift",
-    "apply_routehijack_suffix",
+    "apply_routeaudit_suffix",
 ]

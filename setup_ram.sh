@@ -8,7 +8,7 @@
 # hold them. On a tiny-disk pod, the RAM disk still wins, preserving the old behavior.
 #
 # USE IT (must be sourced so the exports stick):
-#   cd /workspace/routehijack
+#   cd /workspace/routeaudit
 #   source ./setup_ram.sh
 
 # Grow /dev/shm toward ~80% of RAM so the RAM disk competes fairly as a candidate
@@ -32,7 +32,7 @@ done
 if [ -z "$_best" ]; then
   echo "setup_ram: no writable candidate found among: $_cands — leaving paths as-is."
 else
-  _root="$_best/routehijack-scratch"
+  _root="$_best/routeaudit-scratch"
   mkdir -p "$_root/hf_cache"
   export HF_HOME="$_root/hf_cache"
   export TRANSFORMERS_CACHE="$_root/hf_cache"

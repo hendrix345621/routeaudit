@@ -15,7 +15,7 @@ suffix toward routing the judge calls harmful. Goodhart caveat: validate the tra
 suffix with the REAL judge — the probe is a fast proxy, not ground truth.
 
 Status: the probe + feature pooling + training here are complete and unit-tested for
-shape/logic; wiring `probe_loss` into RouteHijack's loss and the distillation run
+shape/logic; wiring `probe_loss` into RouteAudit's loss and the distillation run
 (scripts/distill_harm_probe.py) are the remaining integration steps.
 """
 from __future__ import annotations

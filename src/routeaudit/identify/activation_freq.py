@@ -1,11 +1,11 @@
 """Response-driven expert activation frequency.
 
-Implements RouteHijack Eq. 3 (paper p. 4):
+Implements the RouteHijack paper's Eq. 3 (p. 4):
 
     F_l(e | a) = (1/|a|) · Σ_t  𝟙[e ∈ TopK(logits_{l,t})]
 
 `a` is a response sequence. Query/prompt tokens are masked out per the paper's
-response-driven profiling (RouteHijack p. 5: response-driven beats prompt-driven,
+response-driven profiling (p. 5: response-driven beats prompt-driven,
 69.3% vs 30.5% ASR — masking matters).
 
 Performance notes

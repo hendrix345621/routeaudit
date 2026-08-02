@@ -16,7 +16,7 @@ from .mmlu import mmlu_logprob_accuracy
 
 def _has_mutators(defense: DefenseBundle) -> bool:
     """True if the cell installs a router mutator — that requires the per-prompt
-    step-by-step decode loop. RouteHijack is input-only (the attack lives in the
+    step-by-step decode loop. RouteAudit is input-only (the attack lives in the
     prompt text), so its cells have none and can use batched generation."""
     return defense.router_mutator is not None
 
@@ -63,7 +63,7 @@ def run_cell(
     ui.section(f"cell = [bold]{name}[/bold]  (attack={attack_label or name}  n={len(prompts)})")
 
     # Generate completions. Cells with mutators need the per-prompt step-by-step
-    # decode loop; mutator-free cells (RouteHijack: the attack is in the prompt text)
+    # decode loop; mutator-free cells (RouteAudit: the attack is in the prompt text)
     # use the batched, left-padded generator for far better GPU utilisation.
     if _has_mutators(defense):
         completions = [

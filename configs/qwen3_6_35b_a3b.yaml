@@ -1,4 +1,4 @@
-# RouteHijack config — Qwen3.6-35B-A3B (Qwen3.5-MoE class, hybrid attention).
+# RouteAudit config — Qwen3.6-35B-A3B (Qwen3.5-MoE class, hybrid attention).
 #
 # Dims VERIFIED from the HF config.json (Qwen/Qwen3.6-35B-A3B):
 #   model_type qwen3_5_moe · architectures Qwen3_5MoeForConditionalGeneration
@@ -48,7 +48,7 @@ identify:
   response_only: true
 
 attacks:
-  routehijack:
+  routeaudit:
     suffix_len: 20
     n_steps: 300
     lambda_suppress: 3.0
