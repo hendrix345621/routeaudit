@@ -35,6 +35,7 @@ MIN_COMPUTE_CAPABILITY = (10, 0)  # native packed FP4 experts require Blackwell
 MIN_CUDA = (12, 9)
 MIN_TORCH = (2, 9)
 MIN_TRANSFORMERS = (5, 14)
+DEEPGEMM_KERNEL_API_VERSION = 2
 
 
 def _version_tuple(value: str | None) -> tuple[int, ...]:
@@ -104,8 +105,14 @@ def _probe_deepgemm() -> tuple[bool, str]:
     try:
         from kernels import get_kernel
 
-        kernel = get_kernel("kernels-community/deep-gemm")
-        return True, f"loaded {type(kernel).__module__}.{type(kernel).__name__}"
+        kernel = get_kernel(
+            "kernels-community/deep-gemm",
+            version=DEEPGEMM_KERNEL_API_VERSION,
+        )
+        return True, (
+            f"loaded API v{DEEPGEMM_KERNEL_API_VERSION} "
+            f"{type(kernel).__module__}.{type(kernel).__name__}"
+        )
     except Exception as exc:  # noqa: BLE001
         return False, f"{type(exc).__name__}: {exc}"
 
@@ -153,12 +160,20 @@ def run_preflight(config: str, out: Path) -> dict[str, Any]:
         f"required {_bytes_label(required_vram)} (checkpoint + 20 GiB)",
     )
 
-    disk = shutil.disk_usage(Path.cwd())
+    # Model weights are cached under HF_HOME when it is set. Checking cwd here can
+    # reject a valid Vast instance whose small container root has a large attached
+    # volume, or (worse) approve the wrong filesystem.
+    storage_path = Path(os.environ.get("HF_HOME", Path.cwd())).expanduser().resolve()
+    disk_probe_path = storage_path
+    while not disk_probe_path.exists() and disk_probe_path != disk_probe_path.parent:
+        disk_probe_path = disk_probe_path.parent
+    disk = shutil.disk_usage(disk_probe_path)
     required_disk = repo_size + MIN_DISK_HEADROOM if repo_size is not None else None
     check(
         "free disk",
         required_disk is not None and disk.free >= required_disk,
-        f"free {_bytes_label(disk.free)}, required {_bytes_label(required_disk)} (checkpoint + 40 GiB)",
+        f"path {storage_path}, free {_bytes_label(disk.free)}, "
+        f"required {_bytes_label(required_disk)} (checkpoint + 40 GiB)",
     )
 
     ram = _system_ram()
@@ -232,6 +247,8 @@ def run_preflight(config: str, out: Path) -> dict[str, Any]:
         "torch_cuda": cuda_runtime,
         "nvcc": nvcc_version,
         "cpu_ram_bytes": ram,
+        "storage_path": str(storage_path),
+        "disk_probe_path": str(disk_probe_path),
         "disk_free_bytes": disk.free,
         "gpus": gpus,
         "nvidia_smi": _command(["nvidia-smi"]),

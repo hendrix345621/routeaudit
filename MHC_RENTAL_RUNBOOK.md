@@ -45,11 +45,17 @@ Choose a PyTorch **development** image with CUDA 12.9 or newer; a runtime-only i
 
 ```bash
 cd routehijack
+mkdir -p /workspace/hf-cache
+export HF_HOME=/workspace/hf-cache
 python -m venv --system-site-packages .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e '.[dev,mhc]'
 ```
+
+Replace `/workspace` with the large mounted volume shown by `df -hT`. Keep `HF_HOME`
+set for both preflight and the real run. The preflight reports the exact path it checks;
+do not continue unless that path has at least 190 GiB free.
 
 `--system-site-packages` deliberately keeps the CUDA-matched PyTorch supplied by the
 Vast image. The preflight rejects it if it is too old or lacks the required CUDA runtime.
@@ -69,8 +75,8 @@ It checks and records:
 - CUDA runtime, full toolkit/`nvcc`, PyTorch, Transformers, and `kernels` versions;
 - CPU RAM, free disk, GPU topology, platform, and `nvidia-smi` output;
 - the pinned model revision and repository byte size;
-- the configured native `deepgemm` expert backend and an actual load of the compatible
-  `kernels-community/deep-gemm` extension before any model weights are downloaded.
+- the configured native `deepgemm` expert backend and an actual load of stable API v2 of
+  the compatible `kernels-community/deep-gemm` extension before model weights download.
 
 If it prints `PREFLIGHT FAILED`, do not download the model. Copy
 `artifacts/mhc_real/preflight.json`, then destroy the instance and use the failed check to
