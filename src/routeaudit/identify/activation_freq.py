@@ -74,6 +74,8 @@ def compute_expert_freq(
     spec=None,
     gate_spec=None,
     use_chat_template: bool = True,
+    span: str = "all",
+    max_think_tokens: int = 256,
 ) -> ExpertFreq:
     """Compute F_l(e | a) over a corpus of sequences.
 
@@ -91,6 +93,15 @@ def compute_expert_freq(
                           utilisation; lower if VRAM is tight.
       gate_spec:          a :class:`~routeaudit.model.gate_math.GateSpec`. Required for
                           any gate whose selection isn't `logits.topk(k)` — see below.
+      span:               which response tokens to COUNT — "all" (every response
+                          token, the non-reasoning default), "answer" (post-`</think>`
+                          only), "think" (the trace), or "delimiter" (the `</think>`
+                          window). On a corpus with no traces all four coincide.
+      max_think_tokens:   cap on trace length. A long trace is truncated from its
+                          HEAD, keeping the tail adjacent to `</think>` — head
+                          truncation would delete the answer entirely, since the trace
+                          precedes it. The kept tail is also the region the answer
+                          attends to most, and where refusal intent collapses.
     """
     device = device or next(model.parameters()).device
     pad_id = tokenizer.pad_token_id
@@ -101,33 +112,66 @@ def compute_expert_freq(
     # The tokenizer call is a hidden cost; doing it inside the GPU loop would
     # leave the GPU idle. Pull it out so the GPU gets a steady stream of work.
     # Each entry is (ids[CPU,long], n_prompt) — kept on CPU; batched onto the GPU below.
-    from ..model.prompting import profiling_ids
+    from ..model.prompting import profiling_spans
 
-    prepped: list[tuple[torch.Tensor, int]] = []
+    prepped: list[tuple[torch.Tensor, torch.Tensor]] = []
+    n_dropped_empty = 0
     for item in ui.iter_with_progress(list(sequences), desc=f"{desc} (tokenize)"):
         prompt = item["prompt"]
         response = item["response"]
         if not response:
             continue
         # Render the query through the chat template (query + assistant marker are
-        # the CONTEXT to mask); count only the response content tokens (Eq. 3, §5.1).
-        full_ids, n_prompt = profiling_ids(tokenizer, prompt, response,
-                                           want_template=use_chat_template)
-        if full_ids.shape[0] <= n_prompt:
+        # the CONTEXT to mask); count only the requested response span (Eq. 3, §5.1).
+        s = profiling_spans(tokenizer, prompt, response, span=span,
+                            want_template=use_chat_template)
+        ids, mask, n_ctx = s.ids, s.mask, s.n_ctx
+        if ids.shape[0] <= n_ctx:
             continue
-        if max_response_tokens is not None:
-            full_ids = full_ids[: n_prompt + max_response_tokens]
-        if full_ids.shape[0] > max_total_tokens:
-            # Drop from the head of the response, not the prompt — the prompt
-            # carries the query that the response refers to.
-            keep = max_total_tokens - n_prompt
-            if keep <= 0:
-                continue
-            full_ids = torch.cat([full_ids[:n_prompt], full_ids[n_prompt:n_prompt + keep]])
-        prepped.append((full_ids, n_prompt))
 
+        # Shrink an over-long trace from its HEAD, keeping the tail + `</think>` +
+        # answer. Dropping the response tail instead (the old behaviour) removes the
+        # answer entirely in thinking mode, since the trace comes first.
+        if s.think_len > max_think_tokens:
+            t0, t1 = s.think_span
+            cut0 = t1 - max_think_tokens
+            keep = torch.ones(ids.shape[0], dtype=torch.bool)
+            keep[t0:cut0] = False
+            ids, mask = ids[keep], mask[keep]
+            n_ctx = int(keep[:n_ctx].sum())
+
+        if max_response_tokens is not None and ids.shape[0] - n_ctx > max_response_tokens:
+            # Trim the response TAIL only when the counted span survives it; otherwise
+            # keep the sequence whole rather than silently emptying its mask.
+            trimmed_mask = mask[: n_ctx + max_response_tokens]
+            if bool(trimmed_mask.any()):
+                ids, mask = ids[: n_ctx + max_response_tokens], trimmed_mask
+        if ids.shape[0] > max_total_tokens:
+            keep_n = max_total_tokens - n_ctx
+            if keep_n <= 0:
+                continue
+            trimmed_mask = torch.cat([mask[:n_ctx], mask[n_ctx:n_ctx + keep_n]])
+            if not bool(trimmed_mask.any()):
+                continue
+            ids = torch.cat([ids[:n_ctx], ids[n_ctx:n_ctx + keep_n]])
+            mask = trimmed_mask
+
+        if not bool(mask.any()):
+            # No tokens in the requested span — e.g. `span="answer"` on a generation
+            # that never closed its trace. Counted and reported, never counted as zero.
+            n_dropped_empty += 1
+            continue
+        prepped.append((ids, mask))
+
+    if n_dropped_empty:
+        ui.warn(f"{desc}: dropped {n_dropped_empty} sequence(s) with no tokens in span "
+                f"'{span}' (typically a trace that never reached `</think>`). They are "
+                f"excluded from F, not counted as zeros.")
     if not prepped:
-        raise RuntimeError("No valid sequences after tokenization.")
+        raise RuntimeError(
+            f"No valid sequences after tokenization (span={span!r}). If this is a "
+            f"thinking-mode corpus, check the responses still contain their "
+            f"`<think>…</think>` markup — stripping it leaves nothing to segment.")
 
     # Sort longest-first so each batch pads to a similar length (minimal waste).
     # Counting order is irrelevant — we only accumulate sums.
@@ -166,23 +210,20 @@ def compute_expert_freq(
 
             input_ids = torch.full((B, T_pad), pad_id, dtype=torch.long)
             attn = torch.zeros((B, T_pad), dtype=torch.long)
-            n_prompts = torch.empty(B, dtype=torch.long)
-            real_lens = torch.empty(B, dtype=torch.long)
-            for b, (ids, n_prompt) in enumerate(batch):
+            count_mask = torch.zeros((B, T_pad), dtype=torch.bool)
+            for b, (ids, m) in enumerate(batch):
                 L = ids.shape[0]
                 input_ids[b, :L] = ids
                 attn[b, :L] = 1
-                n_prompts[b] = n_prompt
-                real_lens[b] = L
+                count_mask[b, :L] = m
             input_ids = input_ids.to(device)
             attn = attn.to(device)
+            # Per-sequence span mask. Padding is False by construction, and the query
+            # is False from `profiling_spans`, so this replaces the old
+            # [n_prompt, real_len) arange without changing non-reasoning behaviour.
+            count_mask = count_mask.to(device)
 
             fwd(input_ids=input_ids, attention_mask=attn, use_cache=False)
-
-            # Response-token mask: positions in [n_prompt, real_len) per sequence.
-            ar = torch.arange(T_pad, device=device).unsqueeze(0)            # (1, T_pad)
-            count_mask = (ar >= n_prompts.to(device).unsqueeze(1)) & \
-                         (ar < real_lens.to(device).unsqueeze(1))           # (B, T_pad)
 
             if use_selection:
                 # Selection recomputed through the gate's real semantics. Hash-routed and

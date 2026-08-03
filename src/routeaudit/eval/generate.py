@@ -31,7 +31,13 @@ def generate_with_defense(
     device: str | torch.device | None = None,
     spec=None,
     want_template: bool = True,
-) -> str:
+    return_ids: bool = False,
+):
+    """Returns the completion text, or the generated token ids when `return_ids`.
+
+    Ids are needed in thinking mode: decoding drops the `<think>`/`</think>` special
+    tokens, leaving nothing to segment the answer from the trace with.
+    """
     from ..model.prompting import encode_prompt
     device = device or next(model.parameters()).device
     ids = encode_prompt(tokenizer, prompt, want_template=want_template, device=device).unsqueeze(0)
@@ -61,8 +67,12 @@ def generate_with_defense(
             if tokenizer.eos_token_id is not None and int(next_id.item()) == tokenizer.eos_token_id:
                 break
 
-    completion = tokenizer.decode(out_ids[0, ids.shape[1]:], skip_special_tokens=True)
-    return completion
+    new_ids = out_ids[0, ids.shape[1]:].tolist()
+    if new_ids and tokenizer.eos_token_id is not None and new_ids[-1] == tokenizer.eos_token_id:
+        new_ids = new_ids[:-1]
+    if return_ids:
+        return new_ids
+    return tokenizer.decode(new_ids, skip_special_tokens=True)
 
 
 @torch.no_grad()
@@ -90,6 +100,37 @@ def generate_batch(
 
     Each prompt is rendered through the chat template (if present) so generation is
     in-distribution for an instruct model. Returns one completion per prompt, in order.
+
+    NOTE: decodes with `skip_special_tokens=True`, which DELETES `<think>`/`</think>`
+    when they are special tokens — the text alone can't be segmented afterwards. Use
+    `generate_batch_ids` for anything thinking-aware.
+    """
+    ids = generate_batch_ids(model, tokenizer, prompts, max_new_tokens=max_new_tokens,
+                             do_sample=do_sample, temperature=temperature, device=device,
+                             batch_size=batch_size, want_template=want_template, desc=desc)
+    return [tokenizer.decode(x, skip_special_tokens=True) for x in ids]
+
+
+@torch.no_grad()
+def generate_batch_ids(
+    model,
+    tokenizer,
+    prompts: list[str],
+    *,
+    max_new_tokens: int = 128,
+    do_sample: bool = False,
+    temperature: float = 1.0,
+    device: str | torch.device | None = None,
+    batch_size: int = 8,
+    want_template: bool = True,
+    desc: str = "generate",
+) -> list[list[int]]:
+    """Same batched generation, returning GENERATED TOKEN IDS per prompt.
+
+    Ids, not text, because thinking-mode segmentation has to happen at the token
+    level: `</think>` appears verbatim inside traces as ordinary text, and decoding
+    with `skip_special_tokens` erases the real delimiter entirely. Trailing pad/EOS
+    is trimmed so a short completion isn't padded out to the batch's longest.
     """
     from .. import ui
     from ..model.prompting import render_user_turn, use_template
@@ -109,7 +150,11 @@ def generate_batch(
     if do_sample:
         gen_kwargs["temperature"] = temperature   # only pass when sampling (avoids a warning)
 
-    completions: list[str] = []
+    eos_id = tokenizer.eos_token_id
+    pad_id = tokenizer.pad_token_id
+    stop_ids = {i for i in (eos_id, pad_id) if i is not None}
+
+    out_ids: list[list[int]] = []
     try:
         chunks = [prompts[i:i + batch_size] for i in range(0, len(prompts), batch_size)]
         with ui.progress_bar(len(prompts), desc=desc) as (prog, tid):
@@ -119,8 +164,16 @@ def generate_batch(
                                 add_special_tokens=not templated).to(device)
                 out = model.generate(**enc, **gen_kwargs)
                 new = out[:, enc["input_ids"].shape[1]:]          # drop the (left-padded) prompt
-                completions.extend(tokenizer.batch_decode(new, skip_special_tokens=True))
+                for row in new.tolist():
+                    # Cut at the first EOS/pad: everything after it is batch padding,
+                    # and counting it would inflate every think-length statistic.
+                    cut = len(row)
+                    for j, t in enumerate(row):
+                        if t in stop_ids:
+                            cut = j
+                            break
+                    out_ids.append(row[:cut])
                 prog.advance(tid, len(chunk))
     finally:
         tokenizer.padding_side = prev_side
-    return completions
+    return out_ids

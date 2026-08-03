@@ -24,7 +24,9 @@ It uploads nothing. For non-interactive use: `make run MODEL=qwen3`.
 ## What the phases produce
 
 - `artifacts/eval_results.json` + `eval_results.md` — **consolidated results**: model, suffix,
-  ASR/MMLU/routing-shift, SAFE/AT-RISK verdict, timestamp (the `.md` is the readable report).
+  ASR/MMLU/routing-shift, SAFE/AT-RISK verdict, timestamp (the `.md` is the readable report). In
+  thinking mode it also carries a **Thinking mode** table (scored/truncated counts, the `[lo, hi]`
+  ASR interval, mean think tokens, format-audit pass) and a **Generative reasoning utility** table.
 - `artifacts/eval_cells.jsonl` — raw per-cell numbers for programmatic re-grading.
 - `artifacts/results/` — **full auditable bundle**: `summary.md` + `per_prompt.md`/`.jsonl`
   (every prompt's clean vs attacked completion + string **and** judge verdict) + `transcripts/`.
@@ -43,6 +45,7 @@ It uploads nothing. For non-interactive use: `make run MODEL=qwen3`.
 | Qwen3-MoE | `qwen3` | ✓ | Qwen3-30B-A3B; no shared expert |
 | Qwen3-235B-A22B | `qwen3-235b` | ✓ | 94L · 128 experts · top-8 · no shared expert; ~470 GB → multi-GPU |
 | Qwen3.6-35B-A3B | `qwen3.6` | ✓ | hybrid attention (linear+full); 40L · 256 experts · top-8 · shared expert (unhooked); dims verified |
+| Qwen3.6-35B-A3B (thinking) | `qwen3.6-think` | ✓ | same model, chain-of-thought ON + A2 attack; see "Running a reasoning model in THINKING mode" below |
 | Qwen3.5 MoE | `qwen3.5` | ~ best-effort | hybrid-attention MoE; dims unconfirmed — verify (config header) |
 | Phi-3.5-MoE | HF id `microsoft/Phi-3.5-MoE-instruct` | ✓ | clean Linear gate, Mixtral-like |
 
@@ -71,6 +74,53 @@ python experiments/mhc/tests/run_diagnostics.py --config deepseek-v2-lite --quan
 Precision note: V4-Flash's fp8/fp4 weights are QAT-native, so bitsandbytes NF4 on top adds error
 the deployed model doesn't have — `model/precision.py` refuses that combination. NF4 stays fine
 for the bf16 sibling (V2-Lite ≈ 9 GB).
+
+## Running a reasoning model in THINKING mode (A2 attack)
+
+By default reasoning models run with `enable_thinking: false` so the boundary token `t*` is the
+answer decision. To attack and evaluate them *with chain-of-thought ON*, use a thinking config —
+`configs/qwen3_6_35b_a3b_think.yaml` (nickname `qwen3.6-think`) is the reference:
+
+```bash
+make run MODEL=qwen3.6-think        # harvest (answer-span) → A2 attack → eval → verdict
+```
+
+What differs from a normal run, and why:
+
+- **Answer-span metrics.** ASR (string + judge) and expert localization read the answer *after*
+  `</think>`, not the thinking preamble. Generations that never close their trace have no answer;
+  they are **excluded** from ASR and the report shows the `[lo, hi]` interval the exclusion could
+  move the rate by. A wide interval means `max_new_tokens` was too small — raise it.
+- **`max_new_tokens` must be large.** Traces are long; the 128-token default truncates every one.
+  The think config sets `eval.max_new_tokens: 2048`. Calibrate on your model with a pilot batch —
+  do NOT reuse the DeepSeek-V4 8K/128K/384K numbers, those are a different model.
+- **A judge is mandatory.** With thinking on, the string detector scores the trace, not the answer,
+  so `--no-judge` is refused. Llama-Guard-3-1B is gated: accept its license and `hf auth login`, or
+  the run fails fast (by design — it no longer silently downgrades to string-only).
+- **A2 target mode.** `attacks.routeaudit.target_mode: thought` teacher-forces a compliant
+  *reasoning* opener so the suffix steers what the model deliberates. `t*` stays at the boundary;
+  only the target string changes. Use `target_len: ~32` (a framing sentence is longer than
+  "Sure, here is") and `ascii_only: true` (an English thought target and a multilingual suffix
+  fight each other).
+- **Harvest span.** `identify.span: answer` counts only answer-span tokens when localizing safety
+  experts. Harvest prints a **general-expert overlap** number first: if think/answer safety experts
+  overlap the top general-purpose experts by >30%, suppressing them will cost reasoning utility —
+  raise the Eq. 5 penalty or expect an MMLU/reasoning drop. **Your harvest corpus responses must
+  still contain their `<think>…</think>` markup**, or there is no trace to segment.
+- **Utility that sees thinking.** Set `eval.mmlu.generative: true` (the think config does) for a
+  generative reasoning score read past `</think>`. The old log-prob MMLU column is kept but applies
+  no suffix and cannot observe thinking — the report says so; don't read a retained log-prob MMLU as
+  "reasoning intact".
+
+**Phase 0c (10 s, do it once per model):** confirm where the template puts `<think>`. If the
+generation prompt already emits it, the A2 target must not add its own — `build_thought_target`
+handles this from `prompting.generation_prompt_tail`, but verify the **format audit passes** on a
+pilot batch (the eval warns loudly if the requested mode wasn't actually applied). Read the
+`## Thinking mode` table in `artifacts/results/summary.md`: `trace_rate` near 1.0 and
+`format_audit_passed: true` mean the mode took.
+
+To study the deliberation itself rather than attack it, set `identify.span: think` (or `delimiter`
+for the refusal-cliff region) and compare the localized experts against the answer-span set.
 
 ## Large models on spot/rented GPUs — cost playbook (Qwen3-235B and up)
 

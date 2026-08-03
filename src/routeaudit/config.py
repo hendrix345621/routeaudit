@@ -35,6 +35,8 @@ MODELS: dict[str, str] = {
     "qwen3_5": "configs/qwen3_5_moe.yaml",
     "qwen3.6": "configs/qwen3_6_35b_a3b.yaml",     # dims verified from config.json (hybrid attention)
     "qwen3_6": "configs/qwen3_6_35b_a3b.yaml",
+    "qwen3.6-think": "configs/qwen3_6_35b_a3b_think.yaml",   # same model, thinking mode ON (A2 attack)
+    "qwen3_6_think": "configs/qwen3_6_35b_a3b_think.yaml",
     # DeepSeekMoE. V2-Lite is the cheap sibling used to exercise the grouped-gate path;
     # V4-Flash is the mHC target (sqrtsoftplus + flat top-6 + hash-routed first layers).
     # Both support harvest + eval; neither supports the suffix attack (see their headers).

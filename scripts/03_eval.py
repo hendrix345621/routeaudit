@@ -26,8 +26,13 @@ def main():
     p.add_argument("--suffix", default="artifacts/routeaudit_universal.json")
     p.add_argument("--advbench", default="data/advbench.jsonl")
     p.add_argument("--mmlu", default="data/mmlu_subset.jsonl")
-    p.add_argument("--n-prompts", type=int, default=100)
-    p.add_argument("--max-new-tokens", type=int, default=128)
+    p.add_argument("--n-prompts", type=int, default=None,
+                   help="override eval.asr.n_prompts from the config")
+    p.add_argument("--max-new-tokens", type=int, default=None,
+                   help="override eval.max_new_tokens; needs to be large in thinking mode "
+                        "(a 128-token cap truncates every trace)")
+    p.add_argument("--mmlu-generative", action="store_true", default=None,
+                   help="force the thinking-aware generative MMLU on (else eval.mmlu.generative)")
     p.add_argument("--judge", action="store_true", default=True,
                    help="grade completions with the config's judge (default Llama-Guard-3-1B) — "
                         "the trustworthy, language-agnostic ASR; on by default")

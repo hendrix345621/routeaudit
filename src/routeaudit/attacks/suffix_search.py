@@ -63,6 +63,12 @@ class RouteAuditConfig:
                                           # off-topic text — and with refusal-unlikelihood it forms the
                                           # contrastive margin (#5: push answer up, refusal down).
     target_len: int = 16                  # target tokens teacher-forced for the affirmative term
+    target_mode: str = "answer"           # "answer" = teacher-force the harmful ANSWER opener (classic);
+                                          # "thought" = A2: teacher-force a compliant REASONING opener so
+                                          # the suffix steers what the model DELIBERATES, keeping t* at the
+                                          # boundary. Only affects which target STRINGS the caller builds —
+                                          # the loss mechanism is identical. Raise target_len (~32) for
+                                          # "thought": a framing sentence is longer than "Sure, here is".
     promote_threshold: float = 0.3
     # Eq. 8 penalizes refusal tokens over the first W decoding steps. We score the
     # window of `refusal_window` positions ENDING at the boundary token. With the
@@ -435,7 +441,9 @@ class SuffixSearchRunner:
                 self._target_by_before[id(b)] = (
                     torch.tensor(ids, device=self.device, dtype=torch.long),
                     torch.tensor(mask, device=self.device, dtype=emb_layer.weight.dtype))
-            ui.info(f"affirmative-target on (λ_target={self.cfg.lambda_target}, "
+            _mode = getattr(self.cfg, "target_mode", "answer")
+            _what = "compliant-thought (A2)" if _mode == "thought" else "affirmative-answer"
+            ui.info(f"{_what} target on (λ_target={self.cfg.lambda_target}, "
                     f"{self.cfg.target_len} tokens) — prefix-KV-cache forced off")
 
         best_loss = float("inf")
