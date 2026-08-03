@@ -42,16 +42,14 @@ under `@torch.no_grad()`, so nothing is retained there.
 > set while λ_suppress contributed *nothing* to the search direction. It is now the
 > largest-weighted gradient term. Those weights are stale and need re-tuning.
 
-### B. Group mask fill value follows the installed reference
+### B. Group mask fill value follows the supported installed reference
 
-Transformers 5.9 moved routing into `DeepseekV3TopkRouter.forward` and masks excluded
-groups with **`-inf`**. RouteAudit matches that behavior. This matters when balancing
-bias makes eligible scores negative: a finite zero sentinel would allow an excluded
-expert to re-enter the final top-k.
-
-The bias accumulates in ±0.001 steps during training, so drifting past −1 is reachable.
-Fixed in `selection_scores`; `RouteResult.eligible` added so margin analysis can still
-mark unreachable experts as −inf without breaking forward fidelity.
+The supported Transformers `DeepseekV3MoE.route_tokens_to_experts` fills excluded groups
+with **zero**. RouteAudit now matches that behavior exactly, including the unusual edge
+case where a sufficiently negative balancing bias lets the sentinel enter top-k.
+`RouteResult.eligible` remains separate so analytical margin code can identify which
+groups were selected by the group contest. DeepSeek-V4 uses a flat gate, so this shared
+V2/V3 adapter correction does not affect its result.
 
 ### C. Sinkhorn projection did not match the released implementation
 
@@ -277,15 +275,17 @@ Stage 02 is deliberately blocked with an actionable error rather than failing de
 GPU run with an `IndexError`. Porting it is phase P2 in [plan.md](plan.md), gated on the
 fidelity result above.
 
-## 2.5 Pending on checkpoint access
+## 2.5 Saved-checkpoint fixture
 
 ```bash
-python experiments/mhc/fixtures/validate.py     # skips: "no fixtures — Level 1 PENDING"
+python experiments/mhc/fixtures/validate.py --fixtures PATH_TO_v4_flash_fixtures.pt
 ```
 
-Level 1 (bit-for-bit vs the released DeepSeek-V4 gate) is unmet. Until it passes,
-`configs/deepseek_v4_flash.yaml` is source-faithful but not execution-verified — report it
-that way. `fixtures/extract.py` generates the fixtures the day weights are reachable.
+The completed B200 run is execution-verified and all evidence retained in its legacy
+fixture passes. It remains partial for strict independent parity because that old fixture
+did not retain the router's returned values or the real HyperConnection maps. See
+[V4_ADAPTER_RESULTS.md](V4_ADAPTER_RESULTS.md); no repeat rental is recommended for
+development.
 
 ---
 

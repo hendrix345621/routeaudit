@@ -15,16 +15,21 @@ mechanism the DeepSeek-V4 work depends on:
 
 Refusal SEMANTICS are meaningless here (random weights) — that needs a real trained mHC
 model. This run is about code and mechanism. Level 1 (fixtures from the released
-checkpoint) is `experiments/mhc/fixtures/validate.py`, and is pending weight access.
+checkpoint) is `experiments/mhc/fixtures/validate.py`; the saved format-v1 fixture is a
+partial structural pass and format v2 adds independent official/map evidence.
 
     python experiments/mhc/tests/run_synthetic.py
 """
 from __future__ import annotations
 
+import importlib.util
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE))
+if importlib.util.find_spec("routeaudit") is None:
+    sys.path.insert(0, str(_HERE.parents[2] / "src"))
 
 import torch  # noqa: E402
 
@@ -140,7 +145,7 @@ def main() -> None:
         ui.fail(f"{len(failures)} mechanism check(s) FAILED")
         raise SystemExit(1)
     ui.print_done("Level 0 PASSED — instrumentation validated on a true mHC architecture. "
-                  "Level 1 (fixtures vs the released checkpoint) is still pending weights.")
+                  "Use fixtures/validate.py for the saved real-checkpoint evidence.")
 
 
 if __name__ == "__main__":

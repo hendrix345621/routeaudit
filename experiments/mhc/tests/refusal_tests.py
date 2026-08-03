@@ -268,15 +268,19 @@ def mhc_conservation_profile(dm: DiagModel, prompts, *, eps=1e-3, want_template=
         unconstrained Hyper-Connections, so a gain near 1 is the signature and a gain
         growing with depth falsifies it.
 
-    Requires a model exposing mHC residual modules (`generate_maps`) — i.e. the synthetic
-    model, or a real mHC checkpoint. Returns a `skipped` result on anything else rather
-    than fabricating numbers.
+    The synthetic reference exposes ``generate_maps`` directly. Transformers' real
+    DeepSeek-V4 implementation instead returns ``(post, comb, collapsed)`` from each
+    ``attn_hc``/``ffn_hc`` module; the hook adapter captures those official outputs and
+    reconstructs ``B = comb.transpose(-1, -2)``. Returns a ``skipped`` result on
+    anything else rather than fabricating numbers.
     """
     model = dm.model
     layers = list(getattr(getattr(model, "model", model), "layers", []))
     residuals = [m for layer in layers for m in layer.children()
                  if hasattr(m, "generate_maps")]
-    if not residuals:
+    real_hc = any(hasattr(layer, site) for layer in layers
+                  for site in ("attn_hc", "ffn_hc"))
+    if not residuals and not real_hc:
         return {"skipped": True,
                 "takeaway": "no mHC residual modules found — this model has a standard "
                             "residual stream, so there is no B-path to check."}
@@ -284,39 +288,64 @@ def mhc_conservation_profile(dm: DiagModel, prompts, *, eps=1e-3, want_template=
     device = next(model.parameters()).device
     tok = dm.tok
     checks, gains = [], None
+    sites_seen: set[str] = set()
+    map_locations: set[tuple[int, str]] = set()
     with torch.no_grad():
         for p in ui.iter_with_progress(list(prompts)[:4], "mHC conservation"):
             ids = encode_prompt(tok, p, want_template=want_template,
                                 device=device).unsqueeze(0)
-            x = model.expand_streams(model.get_input_embeddings()(ids))
-            for res in residuals:
-                _, b, _ = res.generate_maps(x)
-                checks.append(mhc.b_path_conservation_check(b, x))
-            if gains is None:
-                gains = mhc.perturbation_profile(layers, x, eps=eps, inject_at=0,
-                                                 token_ids=ids)
+            if real_hc:
+                with MoEHookManager(model, dm.spec) as hm:
+                    hm.capture_mhc_maps()
+                    model(input_ids=ids, use_cache=False)
+                    for layer_idx, layer_maps in hm.capture.mhc_maps.items():
+                        for site, capture in layer_maps.items():
+                            b = mhc.residual_matrix(capture.comb)
+                            checks.append(mhc.b_path_conservation_check(
+                                b, capture.hidden_streams))
+                            sites_seen.add(site)
+                            map_locations.add((layer_idx, site))
+            else:
+                x = model.expand_streams(model.get_input_embeddings()(ids))
+                for res in residuals:
+                    _, b, _ = res.generate_maps(x)
+                    checks.append(mhc.b_path_conservation_check(b, x))
+                if gains is None:
+                    gains = mhc.perturbation_profile(layers, x, eps=eps, inject_at=0,
+                                                     token_ids=ids)
+
+    if not checks:
+        return {"skipped": True,
+                "takeaway": "mHC modules were present but no official map outputs were captured."}
 
     worst_row = max(c["row_sum_dev"] for c in checks)
     worst_col = max(c["col_sum_dev"] for c in checks)
     worst_spec = max(c["spectral_norm_max"] for c in checks)
     worst_mean = max(c.get("stream_mean_dev", 0.0) for c in checks)
     ok = all(c["doubly_stochastic"] and c["non_expansive"] for c in checks)
-    final = gains["final_gain"] if gains else float("nan")
+    final = gains["final_gain"] if gains else None
     constraint = "constraint intact" if ok else "OFF the polytope — conservation claims void"
-    verdict = ("≈1 → conserved, input leverage does NOT amplify with depth (mHC signature)"
-               if final < 3 else "amplifies with depth — no conservation")
+    if final is None:
+        gain_text = "end-to-end perturbation gain not measured by this hook-only adapter"
+    else:
+        verdict = ("≈1 → conserved, input leverage does NOT amplify with depth (mHC signature)"
+                   if final < 3 else "amplifies with depth — no conservation")
+        gain_text = f"perturbation gain at depth = {final:.3f} ({verdict})"
 
     return {
-        "n_mhc_residuals": len(residuals),
+        "n_mhc_residuals": len(map_locations) if real_hc else len(residuals),
+        "n_map_checks": len(checks),
+        "captured_sites": sorted(sites_seen),
+        "measurement_source": "official_hyperconnection_outputs" if real_hc else "generate_maps",
         "max_row_sum_dev": worst_row, "max_col_sum_dev": worst_col,
         "max_spectral_norm": worst_spec, "max_stream_mean_dev": worst_mean,
         "birkhoff_ok": ok,
         "gain_by_layer": [round(g, 4) for g in (gains or {}).get("gain_by_layer", [])],
-        "final_gain": final, "max_gain": (gains or {}).get("max_gain", float("nan")),
+        "final_gain": final, "max_gain": (gains or {}).get("max_gain"),
+        "gain_measured": gains is not None,
         "takeaway": (
             f"B doubly-stochastic to {max(worst_row, worst_col):.1e}, "
-            f"‖B‖₂≤{worst_spec:.3f} ({constraint}); "
-            f"perturbation gain at depth = {final:.3f} ({verdict})."),
+            f"‖B‖₂≤{worst_spec:.3f} ({constraint}); {gain_text}."),
     }
 
 

@@ -100,6 +100,7 @@ model:
   use_chat_template: true
   load:
     experts_implementation: deepgemm  # native packed-FP4 path; Blackwell SM100+ only
+    attn_implementation: null         # V4 is eager-only; SDPA cannot represent its sink term
   arch:
     name: deepseek
     router_output: recompute        # re-derive selection; logits come from output[0]

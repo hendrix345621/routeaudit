@@ -104,9 +104,10 @@ The wrapper performs, in order:
 1. The strict preflight again.
 2. Free synthetic Level 0 validation.
 3. One short real-checkpoint forward using native FP4/FP8 weights.
-4. Gate selection/weight parity validation at a learned middle layer.
-5. Four-stream residual shape and stream-mean validation.
-6. Exact static hash-routing-table validation.
+4. Exact same-device parity against the router's returned expert ids and weights.
+5. Portable CPU replay with an explicit cross-device tolerance.
+6. Four-stream residual shape plus direct B-path checks at `attn_hc` and `ffn_hc`.
+7. Exact static hash-routing-table validation.
 
 CPU/disk model offload, a missing gate/residual/hash capture, a non-four-stream residual,
 or any parity mismatch is a hard failure.
@@ -128,8 +129,10 @@ command exit code: 0
 manifest.json status: passed
 fixture required captures: all true
 residual streams: 4
-gate selected expert set: same
-gate weights: exact
+official gate selected expert set: same
+official same-device gate weights: exact
+portable CPU replay: within 2e-7
+real HyperConnection sites: attn and ffn
 hash routing: exact
 ```
 

@@ -19,6 +19,7 @@ from pathlib import Path
 
 import torch
 from mhc_preflight import run_preflight
+from torch.torch_version import TorchVersion
 
 
 class _StopRun(Exception):
@@ -68,12 +69,19 @@ def _run_stage(name: str, command: list[str], log_path: Path) -> dict:
 
 
 def _fixture_summary(path: Path) -> dict:
-    fx = torch.load(path, map_location="cpu", weights_only=False)
+    with torch.serialization.safe_globals([TorchVersion]):
+        fx = torch.load(path, map_location="cpu", weights_only=True)
     residual = fx.get("residual") or {}
+    gate = fx.get("gate") or {}
+    mhc_maps = fx.get("mhc_maps") or {}
+    sites = mhc_maps.get("sites") or {}
     required = {
         "gate": "gate" in fx,
+        "official_gate_output": isinstance(gate.get("official_indices"), torch.Tensor)
+        and isinstance(gate.get("official_weights"), torch.Tensor),
         "residual": "residual" in fx,
         "four_streams": int(residual.get("n_streams", 0)) == 4,
+        "real_mhc_maps": set(sites) == {"attn", "ffn"},
         "hash": "hash" in fx,
         "logits": "logits" in fx,
     }
@@ -83,8 +91,12 @@ def _fixture_summary(path: Path) -> dict:
         "sha256": _sha256(path),
         "required_captures": required,
         "strict_capture_passed": all(required.values()),
+        "fixture_format_version": (fx.get("meta") or {}).get("fixture_format_version", 1),
         "meta": fx.get("meta", {}),
-        "gate_layer": (fx.get("gate") or {}).get("layer"),
+        "gate_layer": gate.get("layer"),
+        "gate_same_device_parity": gate.get("same_device_parity"),
+        "mhc_layer": mhc_maps.get("layer"),
+        "mhc_sites": sorted(sites),
         "residual_layer": residual.get("layer"),
         "residual_shape": list(residual["hidden"].shape) if "hidden" in residual else None,
         "residual_streams": residual.get("n_streams"),
@@ -158,19 +170,22 @@ def main() -> None:
                     "--fixtures",
                     str(fixture_path),
                     "--atol",
-                    "0",
+                    "2e-7",
+                    "--require-complete",
                 ],
             ),
         ]
         for name, command in commands:
             stage = _run_stage(name, command, log_path)
             manifest["stages"].append(stage)
+            if name == "real_fixture_extract" and stage["return_code"] == 0:
+                manifest["fixture"] = _fixture_summary(fixture_path)
             if stage["return_code"] != 0:
                 manifest["status"] = f"{name}_failed"
                 exit_code = stage["return_code"] or 1
                 raise _StopRun
 
-        summary = _fixture_summary(fixture_path)
+        summary = manifest.get("fixture") or _fixture_summary(fixture_path)
         manifest["fixture"] = summary
         if not summary["strict_capture_passed"]:
             manifest["status"] = "fixture_incomplete"

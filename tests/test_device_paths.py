@@ -68,9 +68,12 @@ def test_loader_passes_checkpoint_revision_and_native_expert_backend(monkeypatch
     assert calls["tokenizer"][1]["revision"] == revision
     assert calls["model"][1]["revision"] == revision
     assert calls["model"][1]["experts_implementation"] == "deepgemm"
+    assert calls["model"][1]["dtype"] is torch.bfloat16
+    assert "torch_dtype" not in calls["model"][1]
+    assert "attn_implementation" not in calls["model"][1]
 
 
-def test_grouped_gate_excludes_masked_experts_even_with_negative_bias():
+def test_grouped_gate_matches_transformers_zero_sentinel_with_negative_bias():
     spec = GateSpec(
         scoring_func="sigmoid",
         top_k=1,
@@ -78,13 +81,13 @@ def test_grouped_gate_excludes_masked_experts_even_with_negative_bias():
         n_group=2,
         topk_group=1,
     )
-    # Group 0 wins the group contest even though all biased scores are negative.
-    # A finite zero sentinel would then let an excluded group-1 expert re-enter.
+    # Group 0 wins the group contest, but Transformers fills excluded group 1 with
+    # zero. With negative eligible scores that sentinel enters the final top-k.
     scores = torch.tensor([[0.9, 0.8, 0.7, 0.6]])
     bias = torch.tensor([[-1.0, -1.0, -2.0, -2.0]])
     selected = gate_math.select(scores, bias, spec)
 
-    assert selected.item() in (0, 1)
+    assert selected.item() in (2, 3)
 
 
 def test_grouped_gate_matches_transformers_5_9_reference():
@@ -98,12 +101,13 @@ def test_grouped_gate_matches_transformers_5_9_reference():
         norm_topk_prob=True,
         routed_scaling_factor=2.5,
     )
-    reference = v3.DeepseekV3TopkRouter(cfg).eval()
+    reference = v3.DeepseekV3MoE(cfg).eval()
     torch.manual_seed(1)
     with torch.no_grad():
-        reference.weight.normal_(0, 0.5)
-        reference.e_score_correction_bias.normal_(-0.5, 0.2)
-        logits, weights, indices = reference(torch.randn(12, cfg.hidden_size))
+        reference.gate.weight.normal_(0, 0.5)
+        reference.gate.e_score_correction_bias.normal_(-0.5, 0.2)
+        logits = reference.gate(torch.randn(12, cfg.hidden_size))
+        indices, weights = reference.route_tokens_to_experts(logits)
 
     spec = GateSpec(
         scoring_func="sigmoid",
@@ -114,7 +118,7 @@ def test_grouped_gate_matches_transformers_5_9_reference():
         norm_topk_prob=cfg.norm_topk_prob,
         routed_scaling_factor=cfg.routed_scaling_factor,
     )
-    actual = gate_math.route(logits, reference.e_score_correction_bias, spec)
+    actual = gate_math.route(logits, reference.gate.e_score_correction_bias, spec)
     dense_reference = torch.zeros_like(logits).scatter_(1, indices, weights)
 
     assert torch.equal(actual.indices.sort(-1).values, indices.sort(-1).values)

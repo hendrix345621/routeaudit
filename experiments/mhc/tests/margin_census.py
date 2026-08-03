@@ -31,11 +31,15 @@ confidently wrong verdict:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE))
+if importlib.util.find_spec("routeaudit") is None:
+    sys.path.insert(0, str(_HERE.parents[2] / "src"))
 
 import torch  # noqa: E402
 

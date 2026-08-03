@@ -44,7 +44,7 @@ def _resolve_dtype(model_ns):
     if native_precision(model_ns):
         ui.info(
             f"dtype '{name}' is the checkpoint's native precision (QAT) — "
-            f"loading as-shipped with torch_dtype='auto'."
+            f"loading as-shipped with dtype='auto'."
         )
         return "auto"
     raise ValueError(
@@ -91,7 +91,7 @@ def load_model(cfg) -> LoadedModel:
     opts = _load_opts(cfg.model)
 
     kwargs = {
-        "torch_dtype": dtype,
+        "dtype": dtype,
         "device_map": cfg.model.device_map,
         "revision": revision,
         "trust_remote_code": True,
@@ -105,14 +105,18 @@ def load_model(cfg) -> LoadedModel:
         kwargs["experts_implementation"] = opts["experts_implementation"]
 
     impl = opts["attn_implementation"]
-    try:
-        model = AutoModelForCausalLM.from_pretrained(cfg.model.hf_id, attn_implementation=impl, **kwargs)
-        if impl:
-            ui.info(f"attention impl: {impl}")
-    except (TypeError, ValueError) as e:
-        # Some trust_remote_code models don't accept attn_implementation — fall back.
-        ui.warn(f"attn_implementation='{impl}' rejected ({type(e).__name__}); loading default.")
+    if impl is None:
         model = AutoModelForCausalLM.from_pretrained(cfg.model.hf_id, **kwargs)
+    else:
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                cfg.model.hf_id, attn_implementation=impl, **kwargs
+            )
+            ui.info(f"attention impl: {impl}")
+        except (TypeError, ValueError) as e:
+            # Some trust_remote_code models don't accept attn_implementation — fall back.
+            ui.warn(f"attn_implementation='{impl}' rejected ({type(e).__name__}); loading default.")
+            model = AutoModelForCausalLM.from_pretrained(cfg.model.hf_id, **kwargs)
 
     model.eval()
     _report_placement(model)

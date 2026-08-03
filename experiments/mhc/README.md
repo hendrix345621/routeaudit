@@ -22,7 +22,7 @@ experiments/mhc/
   deepseek_v4_mhc_technical_blockers.md   ← the neutral 8-blocker survey
   reasoning_model_blockers.md    ← thinking-mode / boundary-token issues
   route_mhc.py                   ← routing-mass diagnostic at t*
-  fixtures/{extract,validate}.py ← ladder Level 1 — PENDING (needs Flash access)
+  fixtures/{extract,validate}.py ← ladder Level 1 — saved legacy fixture + strict v2 format
   tests/                         ← the diagnostic battery + the pytest suite
 ```
 
@@ -51,8 +51,11 @@ Two things the old README got right, and that still hold:
   from the *bias-free* score. So "which experts fire" and "how much each contributes" are
   different tensors, and a flip caused by the bias is a load-balancing artifact, not content.
   `gate_math.RouteResult` keeps both so they cannot be conflated.
-- **The gate returns only `(weights, indices)`.** There is no external score tensor to edit, so
-  routing is recomputed from the gate's *input* (`arch.router_output: recompute`).
+- **Backend outputs differ.** DeepSeek's raw reference gate returns `(weights, indices)`,
+  while Transformers V4 returns `(logits, weights, indices)`. RouteAudit consumes the
+  official logits when present and otherwise recomputes them from the gate input
+  (`arch.router_output: recompute`). Fixture v2 also retains the official returned
+  weights and indices, so same-device parity is checked independently of CPU replay.
 
 The corrected reference gate, per token:
 
@@ -97,17 +100,20 @@ than any text suffix, so:
 > achievable Δ < margins in the safety-bearing layers ⇒ no input-only attack works there.
 > Report robustness. That is a first-class result, not a failure.
 
-**A validation ladder.** Level 0 runs today on CPU; Level 1 is written and pending weights.
+**A validation ladder.** Level 0 passes on CPU. A real B200 run produced a legacy Level 1
+fixture: all retained structural evidence passes, while official returned gate values and
+real HyperConnection maps were not retained by that old format. Fixture v2 captures both.
 
 ```
 Level 0  synthetic mHC model, random weights, fp32, CPU     ← run_synthetic.py     PASSING
-Level 1  component fixtures from the released checkpoint    ← fixtures/validate.py PENDING
+Level 1  component fixtures from the released checkpoint    ← fixtures/validate.py PARTIAL (legacy)
 Level 2  full forward parity on a fixed prompt              ← fixtures/validate.py PENDING
 Level 3  semantic experiments on the real checkpoint        ← the diagnostics      PENDING
 ```
 
-Level 1 is plan.md's stated P0 gate ("reproduces the released Gate bit-for-bit"). It is
-**unmet** — there is no Flash access — so report it as unmet rather than assuming it.
+See [V4_ADAPTER_RESULTS.md](V4_ADAPTER_RESULTS.md) for the evidence, exact limitation, and
+the patched v2 format. Do not describe the successful real forward as checkpoint access
+still being pending.
 
 Everything that stays open after this, stated without reference to this project, is in
 [technical_challenges.md](technical_challenges.md). Short version: steering the biased
@@ -125,23 +131,24 @@ attention.
 - **CSA/HCA token attribution.** Deliberately out of scope — nothing in the pipeline consumes
   token-level attention attribution. The compression schedule sits in the config as
   informational only.
-- **A real mHC checkpoint at any size.** None exists publicly (the mHC paper's 3B/9B/27B aren't
-  released; Qwen3.6 is NOT mHC — verified). V2-Lite is a *gate* proxy with a plain residual, so
-  no conservation result from it says anything about mHC. Use the synthetic model for that.
+- **A small, cheap real mHC checkpoint.** DeepSeek-V4-Flash is public but its native
+  FP4 experts require a large Blackwell deployment; the paper's smaller checkpoints are
+  not available. V2-Lite is a *gate* proxy with a plain residual, so no conservation
+  result from it says anything about mHC.
 
 ## Running it
 
 ```bash
 pip install -e .                                              # once
 
-pytest experiments/mhc/tests/ -q                              # 40 unit tests, seconds
+pytest experiments/mhc/tests/ -q                              # CPU tests, seconds
 python experiments/mhc/tests/run_synthetic.py                 # Level 0, CPU, seconds
 
 # real sibling (~9 GB NF4) — exercises the grouped gate on real weights
 python experiments/mhc/tests/run_diagnostics.py --config deepseek-v2-lite --quant nf4 \
     --tests margin,affirm,leverage,selection,routing,reachability,norm
 
-python experiments/mhc/fixtures/validate.py                   # skips: PENDING weights
+python experiments/mhc/fixtures/validate.py --fixtures PATH   # offline saved-fixture check
 ```
 
 `route_mhc.py` additionally needs `data/` plus `artifacts/{safety,harmful}_experts.json` from a

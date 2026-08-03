@@ -131,6 +131,11 @@ class RouteResult:
     #: (T, E) bool — experts node-limited routing leaves selectable. None on a flat gate,
     #: where every expert is always eligible.
     eligible: torch.Tensor | None = None
+    # The router's own returned values, when its forward exposes them. Keeping these
+    # separate lets fixtures compare RouteAudit with the shipped implementation on the
+    # same device instead of mistaking a CPU/GPU rounding difference for model drift.
+    official_weights: torch.Tensor | None = None
+    official_indices: torch.Tensor | None = None
 
 
 # ─────────────────────────── scoring ───────────────────────────
@@ -177,16 +182,16 @@ def group_mask(sel_scores: torch.Tensor, gs: GateSpec) -> torch.Tensor:
 def selection_scores(scores: torch.Tensor, bias: torch.Tensor | None, gs: GateSpec) -> torch.Tensor:
     """scores + bias, with ineligible groups masked. The tensor top-k actually runs on.
 
-    Ineligible groups are filled with ``-inf``, matching Transformers 5.9's
-    ``DeepseekV3TopkRouter``. This matters when a learned balancing bias makes eligible
-    scores negative: a finite fill such as zero would let an excluded expert re-enter
-    the final top-k.
+    Ineligible groups are filled with zero, matching the supported Transformers
+    ``DeepseekV3MoE.route_tokens_to_experts`` implementation. With an unusually large
+    negative balancing bias that sentinel can enter the final top-k; reproducing that
+    edge case exactly is preferable to silently changing the shipped router.
     """
     sel = scores
     if gs.use_bias and bias is not None:
         sel = sel + bias.to(sel.dtype).view(1, -1)
     if gs.grouped:
-        sel = sel.masked_fill(~group_mask(sel, gs), float("-inf"))
+        sel = sel.masked_fill(~group_mask(sel, gs), 0.0)
     return sel
 
 

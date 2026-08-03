@@ -1,8 +1,7 @@
 """Extract ground-truth component fixtures from a released DeepSeek checkpoint.
 
-Level 1 of the validation ladder. Level 0 (mechanism tests on the synthetic model) runs
-today; this step needs the real weights and is currently PENDING  --  no DeepSeek-V4-Flash
-access. It is written now so it is a single command the day the weights are reachable.
+Level 1 of the validation ladder. Level 0 tests the mechanism synthetically; this step
+extracts independent component evidence from the released DeepSeek-V4-Flash weights.
 
     Level 0  synthetic model, random weights, fp32, CPU   -> RUNS NOW
     Level 1  component fixtures from the released model   -> this script
@@ -35,15 +34,27 @@ import torch
 
 from routeaudit import config as cfg_mod
 from routeaudit import ui
-from routeaudit.model import load_model, precision
+from routeaudit.model import load_model, mhc, precision
 from routeaudit.model.archspec import ArchSpec
 from routeaudit.model.gate_math import GateSpec, learned_router_layers
 from routeaudit.model.hooks import MoEHookManager
 from routeaudit.model.prompting import encode_prompt
 
-# A short, fixed prompt. Determinism matters more than content — the same tokens must
-# produce the same tensors on every run, which is what makes atol=0 meaningful.
+# A short, fixed prompt. Determinism matters more than content: same-device official
+# parity is exact, and portable replay has a separately documented device tolerance.
 FIXTURE_PROMPT = "The capital of France is"
+FIXTURE_FORMAT_VERSION = 2
+
+
+def _align_topk(
+    values: torch.Tensor, indices: torch.Tensor, target_indices: torch.Tensor
+) -> torch.Tensor:
+    """Align per-expert top-k values to another implementation's index order."""
+    order = indices.argsort(-1)
+    target_order = target_indices.argsort(-1)
+    aligned = torch.empty_like(values)
+    aligned.scatter_(-1, target_order, torch.gather(values, -1, order))
+    return aligned
 
 
 @torch.no_grad()
@@ -100,7 +111,7 @@ def extract(config: str, out: Path, *, layer: int | None = None) -> dict:
     target = layer if layer is not None else (learned[len(learned) // 2] if learned else 0)
 
     with MoEHookManager(model, spec) as hm:
-        hm.capture_gate_input().capture_routing(gs).capture_residual()
+        hm.capture_gate_input().capture_routing(gs).capture_residual().capture_mhc_maps()
         out_logits = model(input_ids=ids, use_cache=False).logits
 
     if target not in hm.capture.gate_input or target not in hm.capture.routing:
@@ -125,6 +136,7 @@ def extract(config: str, out: Path, *, layer: int | None = None) -> dict:
 
     fx: dict = {
         "meta": {
+            "fixture_format_version": FIXTURE_FORMAT_VERSION,
             "hf_id": getattr(cfg.model, "hf_id", config),
             "requested_revision": getattr(cfg.model, "revision", None),
             "resolved_revision": getattr(model.config, "_commit_hash", None),
@@ -132,7 +144,7 @@ def extract(config: str, out: Path, *, layer: int | None = None) -> dict:
             "input_ids": ids.cpu(),
             "gate_spec": vars(gs),
             "arch_spec": vars(spec),
-            "torch_version": torch.__version__,
+            "torch_version": str(torch.__version__),
             "transformers_version": importlib.metadata.version("transformers"),
             "python_version": platform.python_version(),
             "platform": platform.platform(),
@@ -145,8 +157,19 @@ def extract(config: str, out: Path, *, layer: int | None = None) -> dict:
         "logits": out_logits[0, -1].float().cpu(),
     }
 
-    # (a) one gate call: input → (weights, indices)                    [Blocker 3]
+    # (a) one gate call, including the router's own returned values   [Blocker 3]
     rr = hm.capture.routing[target]
+    official_set = (
+        rr.official_indices is not None
+        and torch.equal(rr.indices.sort(-1).values, rr.official_indices.sort(-1).values)
+    )
+    if official_set and rr.official_weights is not None:
+        official_aligned = _align_topk(rr.official_weights, rr.official_indices, rr.indices)
+        official_dev = float((rr.weights.float() - official_aligned.float()).abs().max())
+        official_exact = torch.equal(rr.weights, official_aligned)
+    else:
+        official_dev = None
+        official_exact = False
     fx["gate"] = {
         "layer": target,
         "gate_input": hm.capture.gate_input[target].float().cpu(),
@@ -154,6 +177,14 @@ def extract(config: str, out: Path, *, layer: int | None = None) -> dict:
         "sel_scores": rr.sel_scores.cpu(),
         "indices": rr.indices.cpu(),
         "weights": rr.weights.cpu(),
+        "official_indices": rr.official_indices.cpu() if rr.official_indices is not None else None,
+        "official_weights": rr.official_weights.cpu() if rr.official_weights is not None else None,
+        "same_device_parity": {
+            "official_output_captured": rr.official_indices is not None and rr.official_weights is not None,
+            "same_expert_set": official_set,
+            "weights_exact": official_exact,
+            "weights_max_abs_dev": official_dev,
+        },
     }
 
     # (b) the residual state, with its stream count                    [Blockers 1-2]
@@ -162,6 +193,19 @@ def extract(config: str, out: Path, *, layer: int | None = None) -> dict:
         "hidden": hm.capture.residual[target].float().cpu(),
         "n_streams": n_streams,
     }
+
+    sites = {}
+    for site, captured in hm.capture.mhc_maps.get(target, {}).items():
+        b = mhc.residual_matrix(captured.comb)
+        sites[site] = {
+            "hidden_streams": captured.hidden_streams.float().cpu(),
+            "post": captured.post.float().cpu(),
+            "comb": captured.comb.float().cpu(),
+            "collapsed": captured.collapsed.float().cpu(),
+            "b_path": mhc.b_path_conservation_check(b, captured.hidden_streams),
+        }
+    if sites:
+        fx["mhc_maps"] = {"layer": target, "sites": sites}
 
     # (c) hash table slice for the leading layers                      [Blocker 4]
     if gs.num_hash_layers:

@@ -15,11 +15,15 @@ the main project.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))   # so `import diag_common` works
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE))   # so `import diag_common` works
+if importlib.util.find_spec("routeaudit") is None:
+    sys.path.insert(0, str(_HERE.parents[2] / "src"))
 
 from routeaudit import ui                                  # noqa: E402
 from routeaudit.data import read_jsonl                     # noqa: E402

@@ -42,6 +42,16 @@ from . import gate_math, mhc
 
 
 @dataclass
+class MHCMapCapture:
+    """One official DeepSeek-V4 HyperConnection call, retained on-model-device."""
+
+    hidden_streams: torch.Tensor
+    post: torch.Tensor
+    comb: torch.Tensor
+    collapsed: torch.Tensor
+
+
+@dataclass
 class HookCapture:
     """Holds activations captured during a forward pass.
 
@@ -53,6 +63,7 @@ class HookCapture:
     residual: dict[int, torch.Tensor] = field(default_factory=dict)
     gate_input: dict[int, torch.Tensor] = field(default_factory=dict)
     routing: dict[int, "gate_math.RouteResult"] = field(default_factory=dict)
+    mhc_maps: dict[int, dict[str, MHCMapCapture]] = field(default_factory=dict)
 
     #: layer index → (T, top_k) selected expert ids. The lightweight alternative to
     #: `routing` for sweeps over many tokens, where keeping five (T, E) tensors per
@@ -69,6 +80,7 @@ class HookCapture:
         self.residual.clear()
         self.gate_input.clear()
         self.routing.clear()
+        self.mhc_maps.clear()
         self.expert_indices.clear()
         self.residual_streams.clear()
 
@@ -121,6 +133,7 @@ class MoEHookManager:
         self._gate_spec: Optional[gate_math.GateSpec] = None
         self._selection_only = False
         self._capture_hash = False
+        self._capture_mhc_maps = False
         self._token_ids: Optional[torch.Tensor] = None
 
     # ── lifecycle ────────────────────────────────────────────────────────
@@ -165,6 +178,17 @@ class MoEHookManager:
         tensor is stored as-is — reduce it with `mhc.reduce_streams` rather than
         `.view(T, -1)`, which would silently collapse n streams into one vector."""
         self._capture_residual = True
+        return self
+
+    def capture_mhc_maps(self) -> "MoEHookManager":
+        """Capture official DeepSeek-V4 HyperConnection inputs and returned maps.
+
+        V4's ``attn_hc`` and ``ffn_hc`` modules return ``(post, comb, collapsed)``.
+        Together with the retained four-stream input, this is enough to measure the
+        real residual matrix ``B = comb.transpose(-1, -2)`` without patching the model.
+        Standard residual models simply leave ``capture.mhc_maps`` empty.
+        """
+        self._capture_mhc_maps = True
         return self
 
     def capture_gate_input(self) -> "MoEHookManager":
@@ -257,6 +281,40 @@ class MoEHookManager:
         for layer_idx, block in self._iter_moe_blocks():
             self._install_router_hook(layer_idx, block)
         self._install_residual_hooks()
+        self._install_mhc_hooks()
+
+    def _install_mhc_hooks(self) -> None:
+        """Install shape-based hooks on V4's two HyperConnection sites per layer."""
+        base = self._base_module()
+        layers = getattr(base, self.spec.layers_attr)
+        mgr = self
+
+        for layer_idx, layer in enumerate(layers):
+            for site, attr in (("attn", "attn_hc"), ("ffn", "ffn_hc")):
+                module = getattr(layer, attr, None)
+                if not isinstance(module, torch.nn.Module):
+                    continue
+
+                def make_hook(li=layer_idx, site_name=site):
+                    def fwd_hook(_module, inputs, output):
+                        if not mgr._capture_mhc_maps or not inputs or not isinstance(output, tuple):
+                            return output
+                        hidden = inputs[0]
+                        if not isinstance(hidden, torch.Tensor) or len(output) < 3:
+                            return output
+                        post, comb, collapsed = output[:3]
+                        if not all(isinstance(x, torch.Tensor) for x in (post, comb, collapsed)):
+                            return output
+                        mgr.capture.mhc_maps.setdefault(li, {})[site_name] = MHCMapCapture(
+                            hidden_streams=hidden.detach(),
+                            post=post.detach(),
+                            comb=comb.detach(),
+                            collapsed=collapsed.detach(),
+                        )
+                        return output
+                    return fwd_hook
+
+                self._handles.append(module.register_forward_hook(make_hook()))
 
     def _install_residual_hooks(self) -> None:
         """Hook each decoder layer's forward to capture its residual-stream output.
@@ -343,8 +401,16 @@ class MoEHookManager:
         else:
             # `sel_scores` is the bias-free score: nothing is selected BY score here, so
             # presenting a selection score would imply a contest that does not happen.
+            official_weights, official_indices = self._official_topk_from_output(output, gs.top_k)
             self.capture.routing[layer_idx] = gate_math.RouteResult(
-                scores=scores, sel_scores=scores, indices=idx, weights=w, dense=dense)
+                scores=scores,
+                sel_scores=scores,
+                indices=idx,
+                weights=w,
+                dense=dense,
+                official_weights=official_weights,
+                official_indices=official_indices,
+            )
 
     def set_token_ids(self, ids: Optional[torch.Tensor]) -> None:
         """Supply the token ids hash-routed layers need. See `capture_hash_layers`."""
@@ -394,6 +460,38 @@ class MoEHookManager:
                 return t.detach()
         return None
 
+    def _official_topk_from_output(
+        self, output, top_k: int
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Return the router's own ``(weights, indices)`` when present.
+
+        DeepSeek V2/V3/V4 routers expose either ``(logits, weights, indices)`` or
+        ``(weights, indices)``. Detect by dtype and trailing width so the capture also
+        survives tuple-order differences without confusing logits for top-k weights.
+        """
+        tensors = output if isinstance(output, tuple) else (output,)
+        weights = next(
+            (
+                t.detach()
+                for t in tensors
+                if isinstance(t, torch.Tensor) and t.dim() >= 2
+                and t.shape[-1] == top_k and t.is_floating_point()
+            ),
+            None,
+        )
+        indices = next(
+            (
+                t.detach()
+                for t in tensors
+                if isinstance(t, torch.Tensor) and t.dim() >= 2
+                and t.shape[-1] == top_k and not t.is_floating_point()
+            ),
+            None,
+        )
+        if weights is None or indices is None or weights.shape != indices.shape:
+            return None, None
+        return weights, indices
+
     def _record_lfm2_routing(self, layer_idx: int, output, selection_bias=None) -> None:
         """Record LFM2's exact sigmoid routing and its selection-only expert bias."""
         if not isinstance(output, tuple) or len(output) < 3:
@@ -410,7 +508,14 @@ class MoEHookManager:
             return
         dense = torch.zeros_like(scores).scatter_(-1, indices, weights.float())
         self.capture.routing[layer_idx] = gate_math.RouteResult(
-            scores=scores, sel_scores=sel_scores, indices=indices, weights=weights, dense=dense)
+            scores=scores,
+            sel_scores=sel_scores,
+            indices=indices,
+            weights=weights,
+            dense=dense,
+            official_weights=weights,
+            official_indices=indices,
+        )
 
     def _record_routing(self, layer_idx: int, module: torch.nn.Module,
                         hidden: torch.Tensor, output, selection_bias=None) -> None:
@@ -433,8 +538,10 @@ class MoEHookManager:
         if logits is None and recompute:
             # No usable logit tensor in the output — form them from the gate's weight
             # matrix. This is the fallback for DeepSeek's raw `inference/model.py`, whose
-            # Gate returns only (weights, indices). Note it will NOT work against fp8
-            # weights, which is why the output is preferred whenever it carries logits.
+            # gate returns only (weights, indices). Transformers V4 returns
+            # (logits, weights, indices), so its official logits take the preferred path.
+            # Recomputing will NOT work against fp8 weights, which is another reason to
+            # prefer returned logits whenever they are available.
             w = getattr(module, "weight", None)
             if not isinstance(w, torch.Tensor):
                 return
@@ -447,7 +554,11 @@ class MoEHookManager:
             sel = gate_math.selection_scores(scores, bias, gs)
             self.capture.expert_indices[layer_idx] = sel.topk(gs.top_k, dim=-1).indices
         else:
-            self.capture.routing[layer_idx] = gate_math.route(logits, bias, gs)
+            rr = gate_math.route(logits, bias, gs)
+            official_weights, official_indices = self._official_topk_from_output(output, gs.top_k)
+            rr.official_weights = official_weights
+            rr.official_indices = official_indices
+            self.capture.routing[layer_idx] = rr
 
     def _mutate_lfm2_router(self, module: torch.nn.Module, inputs, output,
                             layer_idx: int):

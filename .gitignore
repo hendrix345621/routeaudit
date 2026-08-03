@@ -15,6 +15,7 @@ venv/
 # Pipeline data & outputs (regenerated)
 data/
 artifacts/
+cache/
 *.pt
 *.log
 
