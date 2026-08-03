@@ -19,11 +19,10 @@ artifacts/
 *.log
 
 # my
-todo.md
 TIMELINE.md
 
 # separate experiments (not part of the main pipeline)
-experiments/
+
 
 # local-only, unfiltered harmful-completion transcripts — never commit/share
 sensitive/
