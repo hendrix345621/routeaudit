@@ -124,6 +124,9 @@ class RouteResult:
     indices: torch.Tensor
     weights: torch.Tensor
     dense: torch.Tensor
+    #: (T, E) bool — experts node-limited routing leaves selectable. None on a flat gate,
+    #: where every expert is always eligible.
+    eligible: Optional[torch.Tensor] = None
 
 
 # ─────────────────────────── scoring ───────────────────────────
@@ -169,14 +172,38 @@ def group_mask(sel_scores: torch.Tensor, gs: GateSpec) -> torch.Tensor:
 
 def selection_scores(scores: torch.Tensor, bias: Optional[torch.Tensor],
                      gs: GateSpec) -> torch.Tensor:
-    """scores + bias, with ineligible groups masked to -inf. This is the tensor
-    top-k actually runs on, and the one selection margins must be measured in."""
+    """scores + bias, with ineligible groups masked. The tensor top-k actually runs on.
+
+    The mask fill value is **0.0, not -inf** — that is what
+    `DeepseekV3MoE.route_tokens_to_experts` does, and the difference is observable.
+    Sigmoid affinities live in (0, 1), so once the balancing bias is negative enough to
+    push an *eligible* score below zero, a masked-out expert sitting at 0.0 outranks it
+    and gets selected. Measured against the reference implementation, selections start
+    diverging at a bias mean around -0.5 and disagree on essentially every token by -1.5.
+    Masking to -inf is the "obviously correct" choice and is wrong.
+    """
     sel = scores
     if gs.use_bias and bias is not None:
         sel = sel + bias.to(sel.dtype).view(1, -1)
     if gs.grouped:
-        sel = sel.masked_fill(~group_mask(sel, gs), float("-inf"))
+        sel = sel.masked_fill(~group_mask(sel, gs), 0.0)
     return sel
+
+
+def eligible_mask(scores: torch.Tensor, bias: Optional[torch.Tensor],
+                  gs: GateSpec) -> Optional[torch.Tensor]:
+    """Which experts node-limited routing leaves selectable, or None for a flat gate.
+
+    Kept separate from `selection_scores` because the two need different conventions: the
+    forward pass must reproduce the reference's 0.0 fill, while margin analysis needs to
+    know an expert is *unreachable* rather than merely scoring zero.
+    """
+    if not gs.grouped:
+        return None
+    sel = scores
+    if gs.use_bias and bias is not None:
+        sel = sel + bias.to(sel.dtype).view(1, -1)
+    return group_mask(sel, gs)
 
 
 def select(scores: torch.Tensor, bias: Optional[torch.Tensor], gs: GateSpec) -> torch.Tensor:
@@ -215,17 +242,21 @@ def route(logits: torch.Tensor, bias: Optional[torch.Tensor], gs: GateSpec, *,
     logits = logits.to(dtype)
     scores = affinity(logits, gs.scoring_func)
     sel = selection_scores(scores, bias, gs)
-    idx = sel.topk(gs.top_k, dim=-1).indices
+    # `sorted=False` matches both released routers. Selection is a set; the order within
+    # it is an implementation detail, so never compare index tensors positionally.
+    idx = sel.topk(gs.top_k, dim=-1, sorted=False).indices
     w = gate_weights(scores, idx, gs)
     dense = torch.zeros_like(scores).scatter_(-1, idx, w)
-    return RouteResult(scores=scores, sel_scores=sel, indices=idx, weights=w, dense=dense)
+    return RouteResult(scores=scores, sel_scores=sel, indices=idx, weights=w, dense=dense,
+                       eligible=eligible_mask(scores, bias, gs))
 
 
 # ─────────────────────────── margins ───────────────────────────
 
 
 def selection_margin(sel_scores: torch.Tensor, gs: GateSpec,
-                     expert_ids: Optional[torch.Tensor] = None) -> torch.Tensor:
+                     expert_ids: Optional[torch.Tensor] = None,
+                     eligible: Optional[torch.Tensor] = None) -> torch.Tensor:
     """How far each expert is from flipping in or out of the top-k, in selection-score
     units. This is the quantity an input perturbation has to overcome.
 
@@ -239,10 +270,12 @@ def selection_margin(sel_scores: torch.Tensor, gs: GateSpec,
     Returns (T, E), or (T, len(expert_ids)) when `expert_ids` selects a subset — e.g.
     the safety experts found by the harvest phase.
 
-    For a grouped gate (V2/V3) the margin is *conditional on the group set*: experts
-    masked out by node-limited routing come back as -inf, because no change in their own
-    score alone can select them. Flat gates (V4-Flash) have no such caveat, which is why
-    a flat top-k is a cleanly 1-D attack surface where a grouped one is combinatorial.
+    For a grouped gate (V2/V3), pass `eligible` (from `RouteResult.eligible`): experts
+    their group excluded come back as -inf, because no change to their own score alone can
+    select them. Without it they would appear to sit at the mask fill value, which is a
+    real score in that tensor and would understate how unreachable they are. Flat gates
+    (V4-Flash) have no such caveat — every expert is always eligible, which is why a flat
+    top-k is a cleanly 1-D attack surface where a grouped one is combinatorial.
     """
     k = gs.top_k
     top = sel_scores.topk(k + 1, dim=-1).values          # (T, k+1), descending
@@ -250,6 +283,8 @@ def selection_margin(sel_scores: torch.Tensor, gs: GateSpec,
     kth_plus_1 = top[:, k:k + 1]                          # best excluded
     is_in = sel_scores >= kth
     margin = torch.where(is_in, sel_scores - kth_plus_1, sel_scores - kth)
+    if eligible is not None:
+        margin = margin.masked_fill(~eligible, float("-inf"))
     if expert_ids is not None:
         ids = torch.as_tensor(expert_ids, dtype=torch.long, device=sel_scores.device)
         margin = margin.index_select(-1, ids)

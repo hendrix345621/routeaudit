@@ -115,10 +115,13 @@ class MoEHookManager:
 
         self._handles: list[torch.utils.hooks.RemovableHandle] = []
         self._capture_router = False
+        self._detach_router = True
         self._capture_residual = False
         self._capture_gate_input = False
         self._gate_spec: Optional[gate_math.GateSpec] = None
         self._selection_only = False
+        self._capture_hash = False
+        self._token_ids: Optional[torch.Tensor] = None
 
     # ── lifecycle ────────────────────────────────────────────────────────
 
@@ -136,8 +139,22 @@ class MoEHookManager:
 
     # ── capture switches (set before entering the context, or before forward) ──
 
-    def capture_router_logits(self) -> "MoEHookManager":
+    def capture_router_logits(self, detach: bool = True) -> "MoEHookManager":
+        """Capture pre-top-k router logits in `capture.router_logits`.
+
+        `detach=True` (default) stores a detached tensor — right for analysis, and it
+        keeps the autograd graph from being pinned alive across a whole forward.
+
+        **`detach=False` is required for any loss that must produce a gradient.** A
+        detached tensor has `requires_grad=False` and no `grad_fn`, so a routing loss
+        built on it is a constant: it still evaluates to the right number, and it still
+        works for scoring or ranking candidates, but it contributes exactly zero to
+        `backward()`. That failure is silent whenever the total loss has another term
+        that does carry gradient — the optimization runs, the loss goes down, and the
+        routing objective is steering nothing.
+        """
         self._capture_router = True
+        self._detach_router = detach
         return self
 
     def capture_residual(self) -> "MoEHookManager":
@@ -285,6 +302,70 @@ class MoEHookManager:
                 return b
         return None
 
+    def _record_hash_routing(self, layer_idx: int, module: torch.nn.Module,
+                             hidden: torch.Tensor, output) -> None:
+        """Routing for a hash-gated layer, where selection and weighting come apart.
+
+        A hash router takes `indices = tid2eid[input_ids]` — fixed per token id, so no
+        input change and no gradient can move it — but it still computes
+        `weights = scores.gather(indices)` from the LEARNED score function. So the layer
+        is unsteerable in *which* experts fire and content-dependent in *how much* each
+        contributes. Capturing only the selection (or skipping the layer entirely) throws
+        away a real signal; capturing it as if it were a learned gate invents one.
+
+        Needs the token ids, which the gate's own inputs don't carry — they arrive via
+        `set_token_ids`, populated by a pre-hook on the base model. Without them the layer
+        is skipped rather than guessed at.
+        """
+        gs = self._gate_spec
+        ids = self._token_ids
+        table = getattr(module, "tid2eid", None)
+        if ids is None or not isinstance(table, torch.Tensor):
+            return
+        logits = self._logits_from_output(output, self.spec.n_experts)
+        if logits is None:
+            return
+        idx = gate_math.hash_route(ids.reshape(-1), table).to(logits.device)
+        if idx.shape[0] != logits.shape[0]:
+            return                      # ids/hidden mismatch (padding?) — don't guess
+        scores = gate_math.affinity(logits.float(), gs.scoring_func)
+        w = gate_math.gate_weights(scores, idx, gs)
+        dense = torch.zeros_like(scores).scatter_(-1, idx, w)
+        if self._selection_only:
+            self.capture.expert_indices[layer_idx] = idx
+        else:
+            # `sel_scores` is the bias-free score: nothing is selected BY score here, so
+            # presenting a selection score would imply a contest that does not happen.
+            self.capture.routing[layer_idx] = gate_math.RouteResult(
+                scores=scores, sel_scores=scores, indices=idx, weights=w, dense=dense)
+
+    def set_token_ids(self, ids: Optional[torch.Tensor]) -> None:
+        """Supply the token ids hash-routed layers need. See `capture_hash_layers`."""
+        self._token_ids = ids
+
+    def capture_hash_layers(self) -> "MoEHookManager":
+        """Also capture hash-routed layers, by plumbing token ids to the gate hooks.
+
+        Installs a forward pre-hook on the base module that snapshots `input_ids` for the
+        current forward. Off by default: for membership-based statistics (which experts
+        fire, the usual expert-localization signal) a hash layer contributes only the
+        corpus's token distribution and is noise, so including it is usually wrong. Turn
+        it on for mass-based analyses, where the learned weighting is real signal.
+        """
+        base = getattr(self.model, self.spec.base_attr, self.model)
+        mgr = self
+
+        def pre_hook(_module, args, kwargs):
+            ids = kwargs.get("input_ids")
+            if ids is None and args and isinstance(args[0], torch.Tensor):
+                ids = args[0]
+            mgr._token_ids = ids
+            return None
+
+        self._handles.append(base.register_forward_pre_hook(pre_hook, with_kwargs=True))
+        self._capture_hash = True
+        return self
+
     def _logits_from_output(self, output, n_experts: int) -> Optional[torch.Tensor]:
         """Find the `(T, n_experts)` router logits in whatever the gate returned.
 
@@ -310,8 +391,13 @@ class MoEHookManager:
                         hidden: torch.Tensor, output) -> None:
         """Recompute this layer's routing under the GateSpec and store the RouteResult."""
         gs = self._gate_spec
-        if gate_math.routing_kind(layer_idx, gs) != gate_math.LEARNED:
-            return   # hash/dense layers don't route on content — nothing to recompute
+        kind = gate_math.routing_kind(layer_idx, gs)
+        if kind == gate_math.DENSE:
+            return
+        if kind == gate_math.HASH:
+            if self._capture_hash:
+                self._record_hash_routing(layer_idx, module, hidden, output)
+            return
         h = hidden.reshape(-1, hidden.shape[-1]) if hidden.dim() == 3 else hidden
         recompute = self.spec.router_output == "recompute"
         n_experts = self.spec.n_experts
@@ -366,7 +452,8 @@ class MoEHookManager:
                 scores = output[0]
                 tail = output[1:]
                 if mgr._capture_router:
-                    mgr.capture.router_logits[layer_idx] = scores.detach()
+                    mgr.capture.router_logits[layer_idx] = (
+                        scores.detach() if mgr._detach_router else scores)
                 if mgr._router_mutator is not None:
                     scores = mgr._router_mutator(scores, layer_idx, mgr.step_idx)
                     # Recompute top-k on the biased scores so the MoE dispatch
@@ -384,7 +471,8 @@ class MoEHookManager:
             # Legacy path: gate emits raw logits directly.
             logits = output
             if mgr._capture_router:
-                mgr.capture.router_logits[layer_idx] = logits.detach()
+                mgr.capture.router_logits[layer_idx] = (
+                    logits.detach() if mgr._detach_router else logits)
             if mgr._router_mutator is not None:
                 logits = mgr._router_mutator(logits, layer_idx, mgr.step_idx)
             return logits

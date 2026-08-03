@@ -483,8 +483,17 @@ class SuffixSearchRunner:
         patience = max(0, int(self.cfg.early_stop_patience or 0))
 
         # One persistent hook manager for every forward in the optimisation.
+        #
+        # detach=False is REQUIRED. The proposal step differentiates the total loss
+        # w.r.t. the suffix one-hots, and `_loss_suppress_bi` / `_loss_promote_bi` are
+        # built from these captured logits. Detached, they are constants: the backward
+        # pass still succeeds (the refusal/target terms carry gradient), the loss still
+        # goes down, and the ROUTING objective steers nothing — a silent failure that
+        # makes a "routing-aware" search route-blind in its search direction. The
+        # candidate-scoring paths are all under @torch.no_grad(), so nothing is retained
+        # there.
         with MoEHookManager(self.model, self.spec) as hm:
-            hm.capture_router_logits()
+            hm.capture_router_logits(detach=False)
             self._hm = hm
             self._prefix_cache_ok = False
             if self.cfg.use_prefix_cache and not self._targets_on:
@@ -697,7 +706,10 @@ class SuffixSearchRunner:
             captured = hm.capture.router_logits
         else:
             with MoEHookManager(self.model, self.spec) as fresh_hm:
-                fresh_hm.capture_router_logits()
+                # detach=False: this is the PROPOSAL GRADIENT path. Detached logits make
+                # the suppress/promote terms constants that contribute nothing to
+                # backward — see `capture_router_logits`.
+                fresh_hm.capture_router_logits(detach=False)
                 out = self.model(inputs_embeds=embeds, use_cache=False)
                 captured = dict(fresh_hm.capture.router_logits)
 
