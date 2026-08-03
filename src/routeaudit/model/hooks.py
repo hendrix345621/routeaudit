@@ -223,10 +223,17 @@ class MoEHookManager:
 
     # ── install hooks (internal) ─────────────────────────────────────────
 
+    def _base_module(self):
+        """Resolve an ArchSpec base path, including nested multimodal decoders."""
+        base = self.model
+        for attr in self.spec.base_attr.split("."):
+            base = getattr(base, attr)
+        return base
+
     def _iter_moe_blocks(self):
         """Yield (layer_idx, moe_block) using the ArchSpec to locate modules."""
         s = self.spec
-        base = getattr(self.model, s.base_attr, self.model)
+        base = self._base_module()
         layers = getattr(base, s.layers_attr)
         for i, layer in enumerate(layers):
             block = None
@@ -261,7 +268,7 @@ class MoEHookManager:
         norm profile meaningless (it norms all n streams together).
         """
         s = self.spec
-        base = getattr(self.model, s.base_attr, self.model)
+        base = self._base_module()
         layers = getattr(base, s.layers_attr)
         mgr = self
 
@@ -352,7 +359,7 @@ class MoEHookManager:
         corpus's token distribution and is noise, so including it is usually wrong. Turn
         it on for mass-based analyses, where the learned weighting is real signal.
         """
-        base = getattr(self.model, self.spec.base_attr, self.model)
+        base = self._base_module()
         mgr = self
 
         def pre_hook(_module, args, kwargs):
@@ -387,9 +394,30 @@ class MoEHookManager:
                 return t.detach()
         return None
 
+    def _record_lfm2_routing(self, layer_idx: int, output, selection_bias=None) -> None:
+        """Record LFM2's exact sigmoid routing and its selection-only expert bias."""
+        if not isinstance(output, tuple) or len(output) < 3:
+            return
+        logits, weights, indices = output[:3]
+        if not all(isinstance(x, torch.Tensor) for x in (logits, weights, indices)):
+            return
+        logits, weights, indices = logits.detach(), weights.detach(), indices.detach()
+        scores = logits.float().sigmoid()
+        bias = selection_bias.detach().to(scores.dtype) if isinstance(selection_bias, torch.Tensor) else None
+        sel_scores = scores if bias is None else scores + bias
+        if self._selection_only:
+            self.capture.expert_indices[layer_idx] = indices
+            return
+        dense = torch.zeros_like(scores).scatter_(-1, indices, weights.float())
+        self.capture.routing[layer_idx] = gate_math.RouteResult(
+            scores=scores, sel_scores=sel_scores, indices=indices, weights=weights, dense=dense)
+
     def _record_routing(self, layer_idx: int, module: torch.nn.Module,
-                        hidden: torch.Tensor, output) -> None:
+                        hidden: torch.Tensor, output, selection_bias=None) -> None:
         """Recompute this layer's routing under the GateSpec and store the RouteResult."""
+        if self.spec.router_output == "lfm2":
+            self._record_lfm2_routing(layer_idx, output, selection_bias)
+            return
         gs = self._gate_spec
         kind = gate_math.routing_kind(layer_idx, gs)
         if kind == gate_math.DENSE:
@@ -421,6 +449,26 @@ class MoEHookManager:
         else:
             self.capture.routing[layer_idx] = gate_math.route(logits, bias, gs)
 
+    def _mutate_lfm2_router(self, module: torch.nn.Module, inputs, output,
+                            layer_idx: int):
+        """Apply a mutation while reproducing LFM2's sigmoid/expert-bias router."""
+        if not inputs or not isinstance(output, tuple) or len(output) < 3:
+            return output
+        routed_logits = output[0]
+        if not isinstance(routed_logits, torch.Tensor):
+            return output
+        routed_logits = self._router_mutator(routed_logits, layer_idx, self.step_idx)
+        scores = routed_logits.sigmoid()
+        selection_bias = inputs[1] if len(inputs) > 1 and isinstance(inputs[1], torch.Tensor) else None
+        selection_scores = scores if selection_bias is None else scores + selection_bias.to(scores.dtype)
+        top_k = int(getattr(module, "top_k", output[1].shape[-1]))
+        topk_indices = torch.topk(selection_scores, top_k, dim=-1).indices
+        topk_weights = scores.gather(-1, topk_indices).to(routed_logits.dtype)
+        if bool(getattr(module, "norm_topk_prob", True)):
+            topk_weights = topk_weights / (topk_weights.sum(dim=-1, keepdim=True) + 1e-6)
+        topk_weights = topk_weights * float(getattr(module, "routed_scaling_factor", 1.0))
+        return (routed_logits, topk_weights, topk_indices) + tuple(output[3:])
+
     def _install_router_hook(self, layer_idx: int, block: torch.nn.Module) -> None:
         """Hook the router (`block.<router_attr>`) forward to capture and optionally
         mutate router logits.
@@ -440,7 +488,17 @@ class MoEHookManager:
                     if mgr._capture_gate_input:
                         mgr.capture.gate_input[layer_idx] = h.detach()
                     if mgr._gate_spec is not None:
-                        mgr._record_routing(layer_idx, module, h, output)
+                        mgr._record_routing(layer_idx, module, h, output, inputs[1] if len(inputs) > 1 else None)
+
+            if mgr.spec.router_output == "lfm2":
+                if not isinstance(output, tuple) or not output or not isinstance(output[0], torch.Tensor):
+                    return output
+                if mgr._capture_router:
+                    mgr.capture.router_logits[layer_idx] = (
+                        output[0].detach() if mgr._detach_router else output[0])
+                if mgr._router_mutator is not None:
+                    return mgr._mutate_lfm2_router(module, inputs, output, layer_idx)
+                return output
 
             # OLMoE gate output shape depends on transformers version:
             #   - Old (≤ ~4.46): the gate Linear returns raw logits (B*T, n_experts).

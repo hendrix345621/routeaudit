@@ -126,9 +126,9 @@ pip install -e .
 hf auth login                                         # HF token, for gated model weights
 ```
 
-Requires Python ≥ 3.10 and a CUDA GPU for real runs. The default target
-(`allenai/OLMoE-1B-7B-0924-Instruct`) needs a 24 GB+ card to stay fully on-GPU; smaller cards
-fall back to CPU/disk offload via `device_map: auto` and run far slower.
+Requires Python ≥ 3.10 and a CUDA GPU for real runs. The default target,
+`LiquidAI/LFM2.5-8B-A1B`, is an 8B-total / 1B-active MoE with a ~17 GB BF16 checkpoint; a
+24 GB+ GPU is a practical starting point. Use `make run MODEL=smoke` for a tiny pipeline check.
 
 ---
 
@@ -149,11 +149,11 @@ Two stages, matching how open-weight backbones get repackaged into deployed prod
 Everything is driven by [configs/base.yaml](configs/base.yaml):
 
 - **Swap the target model** under `model:` — any MoE whose router/experts the `ArchSpec` can
-  locate. Presets ship for **OLMoE**, **Mixtral**, **Qwen** MoE, and **Phi-MoE**; add a family by
+  locate. Presets ship for **Liquid LFM2.5**, **OLMoE**, **Mixtral**, **Qwen** MoE, and **Phi-MoE**; add a family by
   adding a preset in [model/archspec.py](src/routeaudit/model/archspec.py) and the dims in the
   config. Passing a HuggingFace id straight to any script auto-detects the family and dims for
   supported `model_type`s, or raises `UnsupportedModelError` with guidance.
-  - Ready-made config nicknames (`--config <name>` or `make run MODEL=<name>`): `olmoe`/`base`,
+  - Ready-made config nicknames (`--config <name>` or `make run MODEL=<name>`): **`liquid`**/`base` (the default), `olmoe`,
     `mixtral`, `qwen2`, `qwen3` (Qwen3-30B-A3B), **`qwen3-235b`** (Qwen3-235B-A22B),
     **`qwen3.6`** (Qwen3.6-35B-A3B — hybrid-attention MoE, dims verified from its config.json;
     every layer still has a standard MoE gate so the attack applies), best-effort **`qwen3.5`**

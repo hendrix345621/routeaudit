@@ -19,7 +19,7 @@ from routeaudit.pipeline import harvest_run
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--config", default="configs/base.yaml")
+    p.add_argument("--config", default="liquid")
     p.add_argument("--out-safety", dest="out_safety", default="artifacts/safety_experts.json")
     p.add_argument("--out-harmful", dest="out_harmful", default="artifacts/harmful_experts.json")
     p.add_argument("--out-diag", dest="out_diag", default="artifacts/identify_diagnostics.pt")

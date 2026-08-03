@@ -71,6 +71,13 @@ PRESETS: dict[str, dict] = {
         router_attr="gate", experts_attr="experts", router_output="recompute",
         router_bias_attr="e_score_correction_bias",
     ),
+    # Liquid LFM2.5 MoE: two initial dense layers, then each decoder layer's
+    # `.feed_forward` is a sparse block with `.gate` and fused `.experts`.
+    # Its gate uses sigmoid scores and an expert-bias argument for selection only.
+    "lfm2": dict(
+        base_attr="model", layers_attr="layers", moe_block_attrs=("feed_forward",),
+        router_attr="gate", experts_attr="experts", router_output="lfm2",
+    ),
 }
 
 _FIELDS = ("base_attr", "layers_attr", "moe_block_attrs",

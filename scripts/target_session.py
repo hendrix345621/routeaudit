@@ -42,7 +42,7 @@ SUFFIX = "artifacts/routeaudit_universal.json"
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--model", default="base", help="target nickname / config path / HF id")
+    p.add_argument("--model", default="liquid", help="target nickname / config path / HF id")
     p.add_argument("--suffix", default=SUFFIX,
                    help="suffix JSON to evaluate (from a surrogate). Ignored if --attack is set.")
     p.add_argument("--attack", action="store_true",

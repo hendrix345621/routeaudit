@@ -21,8 +21,15 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Short model nicknames → config files. Add a line here when you add a config.
 MODELS: dict[str, str] = {
-    "olmoe": "configs/base.yaml",
-    "base": "configs/base.yaml",
+    # LFM2.5-8B-A1B is the default target. Keep OLMoE as an explicit,
+    # lower-cost regression target rather than making it the implicit target.
+    "liquid": "configs/lfm2_5_8b_a1b.yaml",
+    "lfm2": "configs/lfm2_5_8b_a1b.yaml",
+    "lfm2.5": "configs/lfm2_5_8b_a1b.yaml",
+    "lfm2.5-8b-a1b": "configs/lfm2_5_8b_a1b.yaml",
+    "lfm2_5_8b_a1b": "configs/lfm2_5_8b_a1b.yaml",
+    "base": "configs/lfm2_5_8b_a1b.yaml",
+    "olmoe": "configs/olmoe.yaml",
     "mixtral": "configs/mixtral.yaml",
     "qwen2": "configs/qwen2_moe.yaml",
     "qwen2_moe": "configs/qwen2_moe.yaml",
@@ -89,6 +96,7 @@ _HF_TYPE_TO_PRESET: dict[str, str] = {
     "qwen3_next": "qwen",      # best-effort: Qwen3-Next hybrid MoE (standard Linear gate)
     "qwen3_5_moe": "qwen",     # Qwen3.5 / Qwen3.6 hybrid-attention MoE (every layer has a standard
                               # MoE mlp; linear/full attention sublayers don't affect router capture)
+    "lfm2_moe": "lfm2",
     "phimoe": "phimoe",
     # DeepSeekMoE. The gate is not a softmax — its semantics come from the `routing:`
     # block via `gate_math.GateSpec`, filled in by `_routing_ns_from_hf` below.
@@ -178,7 +186,7 @@ def _model_ns_from_hf(hf_cfg, model_id: str, *, dtype: str, device_map: str) -> 
         raise UnsupportedModelError(
             f"'{model_id}' (model_type={mt!r}) is not a supported MoE. This tool needs a "
             f"routed-expert Mixture-of-Experts; supported families: OLMoE, Mixtral, "
-            f"Qwen2/3-MoE, Phi-MoE, DeepSeekMoE V2/V3/V4 (model_type "
+            f"Qwen2/3-MoE, Liquid LFM2.5-MoE, Phi-MoE, DeepSeekMoE V2/V3/V4 (model_type "
             f"{sorted(_HF_TYPE_TO_PRESET)}). Other MoE variants (e.g. DBRX, GPT-OSS, "
             f"Granite-MoE) need a hand-written config in configs/ plus a matching "
             f"ArchSpec preset in model/archspec.py."
@@ -193,6 +201,13 @@ def _model_ns_from_hf(hf_cfg, model_id: str, *, dtype: str, device_map: str) -> 
     routing = _routing_ns_from_hf(hf_cfg, mt or "", int(top_k or 0))
     if routing is not None:
         ns.routing = routing
+    if mt == "lfm2_moe":
+        ns.routing = SimpleNamespace(
+            scoring_func="sigmoid", use_bias=bool(_hf_get(hf_cfg, "use_expert_bias", default=False)),
+            norm_topk_prob=bool(_hf_get(hf_cfg, "norm_topk_prob", default=True)),
+            routed_scaling_factor=float(_hf_get(hf_cfg, "routed_scaling_factor", default=1.0)),
+            top_k=int(top_k or 0),
+        )
     mhc_ns = _mhc_ns_from_hf(hf_cfg)
     if mhc_ns is not None:
         ns.mhc = mhc_ns

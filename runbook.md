@@ -39,7 +39,8 @@ It uploads nothing. For non-interactive use: `make run MODEL=qwen3`.
 
 | Family | nickname / how to select | attack | notes |
 |---|---|---|---|
-| OLMoE | `olmoe` / `base` (· `smoke` = tiny sanity run) | ✓ | default target |
+| Liquid LFM2.5-8B-A1B | `liquid` / `base` | ✓ | default target; 24L · 32 experts · top-4 · ~17 GB BF16 |
+| OLMoE | `olmoe` (· `smoke` = tiny sanity run) | ✓ | cheap regression target |
 | Mixtral | `mixtral` | ✓ | Mixtral-8x7B; fused experts on newer HF → router capture still fine |
 | Qwen2-MoE | `qwen2` | ✓ | Qwen1.5-MoE-A2.7B; shared_expert intentionally not hooked |
 | Qwen3-MoE | `qwen3` | ✓ | Qwen3-30B-A3B; no shared expert |
