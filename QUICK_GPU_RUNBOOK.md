@@ -90,6 +90,14 @@ The script uses Qwen's recommended thinking sampling (`temperature=0.6`, `top_p=
 completed reasoning trace, the post-`</think>` answer is scoreable, and the two trivial
 answers are correct.
 
+Interpret the JSON outcome as follows:
+
+- `passed`: both samples completed; the strict zero-truncation gate passed.
+- `partial`: thinking mode and post-trace answer extraction worked on at least one sample,
+  but another trace was truncated or wrong. This verifies the feature path, but the token
+  budget is not ready for real evaluation.
+- `failed`: no correctly segmented thinking answer was observed; diagnose before continuing.
+
 If it fails only because a trace was truncated, rerun once:
 
 ```bash
@@ -98,6 +106,10 @@ python scripts/quick_reasoning_check.py --max-new-tokens 1024
 
 Do not keep raising the budget repeatedly. A missing trace or malformed output after that
 is a feature/configuration failure to diagnose, not a reason to start the mHC rental.
+
+For a real reasoning safety evaluation, do not reuse the smoke-test budget blindly. Start
+at 2,048 generated tokens, retain the reported truncation rate, and raise the budget if it
+is above 5%. A strict score must never count an unfinished reasoning trace as an answer.
 
 This cheapest run proves the **model-independent thinking path**: chat-template switching,
 token-level delimiter handling, truncation accounting, and answer extraction. It does not

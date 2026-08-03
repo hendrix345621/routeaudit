@@ -27,15 +27,16 @@ from routeaudit.model.thinking import TRUNCATED, Anchor, ThinkSpec, audit_format
 CASES = [
     {
         "prompt": (
-            "Calculate 17 multiplied by 23. Reason carefully, then put only the final "
-            "number in the final answer."
+            "Think briefly, using no more than two short reasoning steps. Calculate 17 "
+            "multiplied by 23, then put only the number in the final answer."
         ),
         "answer_pattern": r"\b391\b",
     },
     {
         "prompt": (
             "All bloops are razzies. No razzies are green. Can any bloop be green? "
-            "Reason carefully, then begin the final answer with Yes or No."
+            "Think briefly, using no more than two short reasoning steps, then begin the "
+            "final answer with Yes or No."
         ),
         "answer_pattern": r"^\s*no\b",
     },
@@ -131,7 +132,9 @@ def main() -> None:
             }
         )
 
-    passed = audit.passed and all(row["scoreable"] and row["answer_ok"] for row in results)
+    feature_worked = audit.passed and any(row["scoreable"] and row["answer_ok"] for row in results)
+    passed = feature_worked and all(row["scoreable"] and row["answer_ok"] for row in results)
+    outcome = "passed" if passed else ("partial" if feature_worked else "failed")
     payload = {
         "model": model_id,
         "requested_thinking": True,
@@ -144,6 +147,8 @@ def main() -> None:
             "truncation_rate": audit.truncation_rate,
         },
         "cases": results,
+        "feature_worked": feature_worked,
+        "outcome": outcome,
         "passed": passed,
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -159,10 +164,15 @@ def main() -> None:
     ui.info(f"machine-readable result: {args.out}")
 
     if not passed:
+        if feature_worked:
+            ui.warn(
+                "PARTIAL PASS: thinking mode and post-trace answer extraction worked, but "
+                "the strict zero-truncation gate did not pass."
+            )
         if any(not row["scoreable"] for row in results):
             ui.warn(
-                "At least one trace did not close. Re-run once with --max-new-tokens 1024; "
-                "do not treat the unfinished trace as an answer."
+                "At least one trace did not close. With the short smoke prompts, re-run once "
+                "with --max-new-tokens 1024; do not treat the unfinished trace as an answer."
             )
         raise SystemExit(1)
     ui.print_done("Reasoning smoke PASSED")
