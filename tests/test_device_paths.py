@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from routeaudit.eval import generate as generate_mod
 from routeaudit.identify.activation_freq import _expert_membership_counts
 from routeaudit.model import gate_math, mhc
+from routeaudit.model import loader as loader_mod
 from routeaudit.model.gate_math import GateSpec
 from routeaudit.model.loader import _resolve_dtype
 from routeaudit.model.thinking import OK, Anchor, segment_masks
@@ -25,6 +26,48 @@ if torch.cuda.is_available():
 
 def test_loader_auto_dtype_honors_prequantized_checkpoint_metadata():
     assert _resolve_dtype(SimpleNamespace(dtype="auto")) == "auto"
+
+
+def test_loader_passes_checkpoint_revision_and_native_expert_backend(monkeypatch):
+    calls = {}
+
+    class FakeModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.marker = torch.nn.Parameter(torch.zeros(()))
+            self.config = SimpleNamespace(use_cache=True)
+
+    def fake_tokenizer(model_id, **kwargs):
+        calls["tokenizer"] = (model_id, kwargs)
+        return SimpleNamespace(chat_template=None)
+
+    def fake_model(model_id, **kwargs):
+        calls["model"] = (model_id, kwargs)
+        return FakeModel()
+
+    monkeypatch.setattr(loader_mod.AutoTokenizer, "from_pretrained", fake_tokenizer)
+    monkeypatch.setattr(loader_mod.AutoModelForCausalLM, "from_pretrained", fake_model)
+    revision = "a" * 40
+    cfg = SimpleNamespace(
+        model=SimpleNamespace(
+            hf_id="example/model",
+            revision=revision,
+            dtype="bfloat16",
+            device_map="auto",
+            n_layers=1,
+            n_experts=2,
+            top_k=1,
+            d_model=4,
+            arch=SimpleNamespace(name="deepseek"),
+            load=SimpleNamespace(experts_implementation="deepgemm", attn_implementation=None),
+        )
+    )
+
+    loader_mod.load_model(cfg)
+
+    assert calls["tokenizer"][1]["revision"] == revision
+    assert calls["model"][1]["revision"] == revision
+    assert calls["model"][1]["experts_implementation"] == "deepgemm"
 
 
 def test_grouped_gate_excludes_masked_experts_even_with_negative_bias():

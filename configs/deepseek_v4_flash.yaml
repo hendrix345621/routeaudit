@@ -68,9 +68,11 @@
 # PRECISION: config declares torch_dtype bfloat16 with a quantization_config of
 # fp8 e4m3 (128x128 weight blocks, dynamic activation scaling, ue8m0 scale format), and
 # expert_dtype fp4. Both are quantization-aware-trained — that IS the deployed model, not
-# an approximation of a bf16 one. Load as-shipped and let transformers' fp8 path handle
-# it. Do NOT add bitsandbytes NF4/int8; `model/precision.py` refuses it (it keys off
-# expert_dtype). ~160 GB as shipped → fits a 2x80 GB node natively.
+# an approximation of a bf16 one. Load as-shipped and let Transformers handle the packed
+# weights. Do NOT add bitsandbytes NF4/int8; `model/precision.py` refuses it (it keys off
+# expert_dtype). The current native FP4 expert backend requires Blackwell (SM100+) and
+# CUDA toolkit 12.9+. The pinned checkpoint is 159.63 GB; budget at least 20 GiB of VRAM
+# beyond its file size for runtime state. H100/H200 are NOT the no-surprises native path.
 #
 # CONFIRMED ABSENT from the released config, so not set below:
 #   • n_group / topk_group        — selection is flat
@@ -84,6 +86,7 @@
 
 model:
   hf_id: deepseek-ai/DeepSeek-V4-Flash
+  revision: 60d8d70770c6776ff598c94bb586a859a38244f1
   dtype: bfloat16           # config's torch_dtype; the fp8 quantization_config drives
                             # the actual storage (e4m3, 128x128 blocks, dynamic scales)
   expert_dtype: fp4         # MoE experts; read by model/precision.py to refuse re-quant
@@ -95,6 +98,8 @@ model:
   d_expert: 2048            # moe_intermediate_size
   vocab_size: 129280
   use_chat_template: true
+  load:
+    experts_implementation: deepgemm  # native packed-FP4 path; Blackwell SM100+ only
   arch:
     name: deepseek
     router_output: recompute        # re-derive selection; logits come from output[0]

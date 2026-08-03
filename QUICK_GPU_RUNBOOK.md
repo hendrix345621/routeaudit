@@ -14,7 +14,7 @@ you do not pay for a larger GPU while debugging ordinary code or environment pro
 |---|---|---|---|---|
 | 0 | Unit tests + synthetic mHC | Local CPU, no rental | Project mechanisms and device paths work | Any test fails |
 | 1 | Qwen3-4B reasoning smoke | 1 x 16–24 GB GPU | Thinking is emitted, closes, segments, and yields answers | Format, truncation, or answer check fails |
-| 2 | Real DeepSeek-V4 fixture | Prefer 2 x 94/96 GB H100-class; >=180 GB aggregate VRAM | Shipped gate output and four-stream residual are compatible with the implementation | CPU/disk offload, missing capture, or fixture mismatch |
+| 2 | Real DeepSeek-V4 fixture | Blackwell SM100+, checkpoint + 20 GiB free VRAM | Shipped gate, hash route, and four-stream residual are compatible | Any preflight or fixture mismatch |
 
 Do reasoning before real mHC. It uses a much smaller checkpoint and catches template,
 generation, and answer-span bugs before the expensive rental. The synthetic mHC check is
@@ -48,14 +48,17 @@ For the cheapest reasoning-only rental:
 
 For the genuine mHC rental:
 
-- fastest/safest simple choice: 2 x H100 NVL 94 GB (or another node with at least
-  180 GB aggregate VRAM and a fast interconnect);
-- 220 GB disk minimum; 250 GB is comfortable;
+- Blackwell only (compute capability >=10.0): one B200/B300 or two 96 GB Blackwell
+  cards on the same host are the practical shapes;
+- the strict preflight requires the 159.63 GB checkpoint plus 20 GiB of free aggregate
+  VRAM, 64 GiB CPU RAM, and the checkpoint plus 40 GiB of free disk;
+- allocate 250 GB disk and prefer at least 128 GB CPU RAM;
+- use CUDA toolkit 12.9+ with `nvcc`, PyTorch 2.9+, Transformers 5.14+, and `kernels`;
 - do not add NF4/int8 quantization: DeepSeek-V4-Flash already ships as mixed FP4/FP8.
 
-Nominal 2 x 80 GB exactly matches the checkpoint's roughly 160 GB file size and leaves
-little room for runtime state. Use it only if the host/config is already known to load
-fully on GPU; any CPU or disk offload defeats the speed goal and weakens the test setup.
+Do not rent H100/H200/A100 for this as-shipped fixture. Current Transformers requires
+Blackwell SM100+ for DeepSeek-V4-style FP4-packed expert weights. Dequantizing to BF16
+would require far more VRAM and would no longer validate the deployed checkpoint.
 
 ## Common setup on a rented instance
 
@@ -63,7 +66,7 @@ Connect using the SSH command shown by Vast, then copy or clone the project. In 
 project root:
 
 ```bash
-python -m venv .venv
+python -m venv --system-site-packages .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e '.[dev]'
@@ -129,44 +132,46 @@ the lowest-cost two-rental plan.
 
 ## 2. Genuine mHC compatibility check
 
-On the larger instance, first repeat the free synthetic check. Then capture one short
-forward from the real checkpoint and validate it:
+Run the strict hardware/software preflight before downloading weights:
 
 ```bash
-python experiments/mhc/tests/run_synthetic.py
-python experiments/mhc/fixtures/extract.py \
-  --config deepseek-v4-flash \
-  --out artifacts/v4_flash_fixtures.pt
-python experiments/mhc/fixtures/validate.py \
-  --fixtures artifacts/v4_flash_fixtures.pt
+python -m pip install -e '.[mhc]'
+python scripts/run_mhc_smoke.py --preflight-only
 ```
 
-Watch the loader output. The run is not a speed-valid GPU test if it warns that layers
-were offloaded to CPU or disk.
+If and only if that passes, run the complete job:
+
+```bash
+python scripts/run_mhc_smoke.py
+```
+
+The wrapper runs the synthetic checks, one real forward, exact CPU validation, strict
+capture checks, and records the environment and logs under `artifacts/mhc_real/`.
 
 Pass gate:
 
 - fixture extraction captures `gate` and `residual` entries;
 - validation reports the same selected expert set and matching gate weights;
 - residual validation records four streams and a valid stream-mean reduction;
+- hash routing is captured and reproduced exactly;
+- `manifest.json` reports `"status": "passed"`;
 - the command exits zero.
 
-A missing hash fixture may be reported as skipped if the released module does not expose
-its table. Record that as an unverified hash-routing sub-check; do not call it a pass.
-Likewise, this fixture check validates compatibility, not the full semantic safety claim.
+A missing hash fixture is now a failure, not a skipped pass. Likewise, this fixture check
+validates compatibility, not the full semantic safety claim.
 
-Copy out `artifacts/v4_flash_fixtures.pt` immediately. It is small compared with the model
-cache and is all you need for repeat CPU-side validation.
+Copy the entire `artifacts/mhc_real/` directory out immediately. The fixture is small
+compared with the model cache and supports repeat CPU-side validation.
 
 ## Cheapest versus fastest rental strategy
 
 **Lowest expected spend:** use two rentals. Run Qwen3-4B on one cheap 16–24 GB GPU,
-destroy it after the JSON is copied, and rent the >=180 GB aggregate node only for the
+destroy it after the JSON is copied, and rent the compatible Blackwell node only for the
 one-forward DeepSeek fixture. Choose on-demand for the expensive first attempt; an
 interruptible instance is sensible only after the procedure has already succeeded and
 you know the run can restart cleanly.
 
-**Fastest/simple administration:** use one 2 x 94/96 GB node with about 250 GB disk. Run
+**Fastest/simple administration:** use one compatible Blackwell node with 250 GB disk. Run
 the Qwen smoke first, unload/exit that process, then run the DeepSeek fixture. This avoids
 a second setup but pays for an idle second GPU during the Qwen step, so it is usually not
 the cheapest.
@@ -188,6 +193,7 @@ Useful primary references:
 - [Qwen3-30B-A3B-FP8 model card](https://huggingface.co/Qwen/Qwen3-30B-A3B-FP8)
 - [Qwen3-4B model card](https://huggingface.co/Qwen/Qwen3-4B)
 - [Transformers fine-grained FP8 hardware requirements](https://huggingface.co/docs/transformers/quantization/finegrained_fp8)
+- [Transformers expert backends and packed-FP4 requirement](https://huggingface.co/docs/transformers/main/experts_interface)
 - [DeepSeek-V4-Flash model card](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)
 - [Vast.ai offer filters](https://docs.vast.ai/api-reference/search/search-offers)
 - [Vast.ai instance lifecycle](https://docs.vast.ai/guides/instances/manage-instances)

@@ -68,8 +68,7 @@ def _coerce_max_memory(mm):
 
 
 def _load_opts(model_ns) -> dict:
-    """Optional `model.load:` block — bf16-only fit/speed knobs. NO quantization
-    (it would perturb the router logits harvest localizes and the attack depends on)."""
+    """Optional `model.load:` block — placement/backend knobs, never re-quantization."""
     lo = getattr(model_ns, "load", None)
     g = (lambda k, d=None: getattr(lo, k, d)) if lo is not None else (lambda k, d=None: d)
     return {
@@ -77,20 +76,33 @@ def _load_opts(model_ns) -> dict:
         "max_memory": _coerce_max_memory(g("max_memory")),
         "offload_folder": g("offload_folder"),
         "offload_state_dict": bool(g("offload_state_dict", False)),
+        "experts_implementation": g("experts_implementation"),
     }
 
 
 def load_model(cfg) -> LoadedModel:
     dtype = _resolve_dtype(cfg.model)
-    tok = AutoTokenizer.from_pretrained(cfg.model.hf_id, trust_remote_code=True)
+    revision = getattr(cfg.model, "revision", None)
+    tok = AutoTokenizer.from_pretrained(
+        cfg.model.hf_id,
+        revision=revision,
+        trust_remote_code=True,
+    )
     opts = _load_opts(cfg.model)
 
-    kwargs = {"torch_dtype": dtype, "device_map": cfg.model.device_map, "trust_remote_code": True}
+    kwargs = {
+        "torch_dtype": dtype,
+        "device_map": cfg.model.device_map,
+        "revision": revision,
+        "trust_remote_code": True,
+    }
     if opts["max_memory"]:
         kwargs["max_memory"] = opts["max_memory"]
     if opts["offload_folder"]:
         kwargs["offload_folder"] = opts["offload_folder"]
         kwargs["offload_state_dict"] = opts["offload_state_dict"]
+    if opts["experts_implementation"]:
+        kwargs["experts_implementation"] = opts["experts_implementation"]
 
     impl = opts["attn_implementation"]
     try:

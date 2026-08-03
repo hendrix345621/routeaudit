@@ -12,6 +12,7 @@ model", and until it happens the P0 gate is unmet  --  say so in any writeup.
     python experiments/mhc/fixtures/validate.py
     python experiments/mhc/fixtures/validate.py --fixtures path/to/v4_flash_fixtures.pt
 """
+
 from __future__ import annotations
 
 import argparse
@@ -77,17 +78,28 @@ def validate_residual(fx: dict) -> list[tuple[bool, str]]:
     number from that model was computed on the wrong tensor."""
     r = fx.get("residual")
     if not r:
-        return [(True, "no residual fixture (skipped)")]
+        return [(False, "no residual fixture")]
     n = int(r["n_streams"])
     h = r["hidden"]
-    expected = 4 if h.dim() == 4 else 1
-    ok = n == (h.shape[-2] if h.dim() == 4 else 1)
-    lines = [(ok, f"residual streams: recorded n={n}, tensor rank {h.dim()} "
-                  f"{'consistent' if ok else 'INCONSISTENT'} (expected {expected})")]
+    expected = 4
+    ok = h.dim() == 4 and n == expected and h.shape[-2] == expected
+    lines = [
+        (
+            ok,
+            (
+                f"residual streams: recorded n={n}, tensor rank {h.dim()} "
+                f"{'consistent' if ok else 'INCONSISTENT'} (expected {expected})"
+            ),
+        )
+    ]
     if n > 1:
         red = mhc.reduce_residual(h, n, "mean")
-        lines.append((red.shape[-1] == h.shape[-1] and red.dim() == h.dim() - 1,
-                      f"stream-mean reduction: {tuple(h.shape)} → {tuple(red.shape)}"))
+        lines.append(
+            (
+                red.shape[-1] == h.shape[-1] and red.dim() == h.dim() - 1,
+                f"stream-mean reduction: {tuple(h.shape)} → {tuple(red.shape)}",
+            )
+        )
     return lines
 
 
@@ -95,35 +107,47 @@ def validate_hash(fx: dict) -> list[tuple[bool, str]]:
     """The free oracle: hash routing must reproduce the static table exactly."""
     h = fx.get("hash")
     if not h:
-        return [(True, "no hash fixture (skipped)")]
+        return [(False, "no hash fixture")]
     table = h["table"]
     ids = torch.arange(min(256, table.shape[0]))
     ok = torch.equal(gate_math.hash_route(ids, table), table[ids])
-    return [(ok, f"hash routing reproduces the token-id table for {len(ids)} ids "
-                 f"({'exact' if ok else 'MISMATCH'})")]
+    return [
+        (
+            ok,
+            (
+                f"hash routing reproduces the token-id table for {len(ids)} ids "
+                f"({'exact' if ok else 'MISMATCH'})"
+            ),
+        )
+    ]
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--fixtures", type=Path, default=DEFAULT_FIXTURES)
-    ap.add_argument("--atol", type=float, default=0.0,
-                    help="0 = bitwise (same dtype + kernel stack). Relax to fp8 "
-                         "resolution when comparing an fp32 reimplementation to fp8 truth.")
+    ap.add_argument(
+        "--atol",
+        type=float,
+        default=0.0,
+        help="0 = bitwise (same dtype + kernel stack). Relax to fp8 "
+        "resolution when comparing an fp32 reimplementation to fp8 truth.",
+    )
     args = ap.parse_args()
 
     if not args.fixtures.exists():
-        ui.warn(f"no fixtures at {args.fixtures} — Level 1 validation is PENDING.\n"
-                f"  It needs access to the released checkpoint. Generate with:\n"
-                f"    python experiments/mhc/fixtures/extract.py --config deepseek-v4-flash\n"
-                f"  Until then plan.md's P0 gate ('reproduces the released Gate bit-for-bit') "
-                f"is UNMET — report it as unmet rather than assuming it.")
+        ui.warn(
+            f"no fixtures at {args.fixtures} — Level 1 validation is PENDING.\n"
+            f"  It needs access to the released checkpoint. Generate with:\n"
+            f"    python experiments/mhc/fixtures/extract.py --config deepseek-v4-flash\n"
+            f"  Until then plan.md's P0 gate ('reproduces the released Gate bit-for-bit') "
+            f"is UNMET — report it as unmet rather than assuming it."
+        )
         raise SystemExit(0)
 
     fx = torch.load(args.fixtures, map_location="cpu", weights_only=False)
     ui.section(f"validating against {fx['meta']['hf_id']}")
 
-    results = (validate_gate(fx, args.atol) + validate_residual(fx) + validate_hash(fx))
+    results = validate_gate(fx, args.atol) + validate_residual(fx) + validate_hash(fx)
     for ok, line in results:
         (ui.ok if ok else ui.fail)(line)
 
