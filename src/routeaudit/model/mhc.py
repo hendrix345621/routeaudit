@@ -24,6 +24,7 @@ Two consequences this module exists to handle:
 What mHC does NOT break: the MoE gate. `A_l · X_l` is d-dimensional, so gate-input
 capture works unchanged — see `hooks.capture_routing`.
 """
+
 from __future__ import annotations
 
 import torch
@@ -34,8 +35,7 @@ _EPS = 1e-9
 # ─────────────────────────── the constrained mixing map ───────────────────────────
 
 
-def sinkhorn_knopp(b_tilde: torch.Tensor, t_max: int = 20,
-                   eps: float = 1e-6) -> torch.Tensor:
+def sinkhorn_knopp(b_tilde: torch.Tensor, t_max: int = 20, eps: float = 1e-6) -> torch.Tensor:
     """Project raw mixing parameters onto the Birkhoff polytope, as the released model does.
 
     Transcribed from `DeepseekV4HyperConnection.forward` in transformers'
@@ -72,10 +72,10 @@ def sinkhorn_knopp(b_tilde: torch.Tensor, t_max: int = 20,
         doubly stochastic, so conservation composes rather than decaying.
     """
     m = torch.softmax(b_tilde, dim=-1) + eps
-    m = m / (m.sum(dim=-2, keepdim=True) + eps)                  # T_c (iteration 1)
+    m = m / (m.sum(dim=-2, keepdim=True) + eps)  # T_c (iteration 1)
     for _ in range(max(0, t_max - 1)):
-        m = m / (m.sum(dim=-1, keepdim=True) + eps)              # T_r
-        m = m / (m.sum(dim=-2, keepdim=True) + eps)              # T_c — ends here
+        m = m / (m.sum(dim=-1, keepdim=True) + eps)  # T_r
+        m = m / (m.sum(dim=-2, keepdim=True) + eps)  # T_c — ends here
     return m
 
 
@@ -114,11 +114,10 @@ def mix_residual(b: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
 
 def write_back(c: torch.Tensor, h_out: torch.Tensor) -> torch.Tensor:
     """C_l · F_l(·) — broadcast the sub-layer output back into the n streams."""
-    return torch.einsum("btn,btd->btnd", c, h_out)
+    return c.unsqueeze(-1) * h_out.unsqueeze(-2)
 
 
-def mhc_update(b: torch.Tensor, c: torch.Tensor, x: torch.Tensor,
-               h_out: torch.Tensor) -> torch.Tensor:
+def mhc_update(b: torch.Tensor, c: torch.Tensor, x: torch.Tensor, h_out: torch.Tensor) -> torch.Tensor:
     """Eq. 1: X_{l+1} = B_l X_l + C_l F_l(A_l X_l)."""
     return mix_residual(b, x) + write_back(c, h_out)
 
@@ -182,9 +181,8 @@ def reduce_residual(x: torch.Tensor, n_streams: int, mode: str = "mean") -> torc
 # ─────────────────────────── measurement oracles ───────────────────────────
 
 
-@torch.no_grad()
-def b_path_conservation_check(b: torch.Tensor, x: torch.Tensor | None = None,
-                              tol: float = 1e-4) -> dict:
+@torch.inference_mode()
+def b_path_conservation_check(b: torch.Tensor, x: torch.Tensor | None = None, tol: float = 1e-4) -> dict:
     """Verify the paper's three guarantees on real activations rather than asserting them.
 
     Returns measurements plus booleans, so a diagnostic can report *how far off* a real
@@ -197,9 +195,17 @@ def b_path_conservation_check(b: torch.Tensor, x: torch.Tensor | None = None,
     conservation claim downstream — check it before interpreting a norm profile.
     """
     b = b.float()
-    row_dev = float((b.sum(dim=-1) - 1).abs().max())
-    col_dev = float((b.sum(dim=-2) - 1).abs().max())
-    spec = float(torch.linalg.matrix_norm(b, ord=2).max())
+    metrics = [
+        (b.sum(dim=-1) - 1).abs().max(),
+        (b.sum(dim=-2) - 1).abs().max(),
+        torch.linalg.matrix_norm(b, ord=2).max(),
+    ]
+    if x is not None:
+        mixed = mix_residual(b, x.float())
+        metrics.append((mixed.mean(dim=-2) - x.float().mean(dim=-2)).abs().max())
+    # Sync once for the complete diagnostic instead of once per scalar metric.
+    values = torch.stack(metrics).cpu().tolist()
+    row_dev, col_dev, spec = values[:3]
     out = {
         "row_sum_dev": row_dev,
         "col_sum_dev": col_dev,
@@ -208,16 +214,16 @@ def b_path_conservation_check(b: torch.Tensor, x: torch.Tensor | None = None,
         "non_expansive": spec <= 1 + tol,
     }
     if x is not None:
-        mixed = mix_residual(b, x.float())
-        dev = float((mixed.mean(dim=-2) - x.float().mean(dim=-2)).abs().max())
+        dev = values[3]
         out["stream_mean_dev"] = dev
         out["mean_conserved"] = dev <= tol
     return out
 
 
-@torch.no_grad()
-def perturbation_profile(layers, x0: torch.Tensor, *, eps: float = 1e-3,
-                         inject_at: int = 0, seed: int = 0, **layer_kw) -> dict:
+@torch.inference_mode()
+def perturbation_profile(
+    layers, x0: torch.Tensor, *, eps: float = 1e-3, inject_at: int = 0, seed: int = 0, **layer_kw
+) -> dict:
     """Depth-resolved perturbation gain: inject a perturbation into the residual state
     at `inject_at`, then track how it grows or decays through the remaining layers.
 
@@ -237,17 +243,20 @@ def perturbation_profile(layers, x0: torch.Tensor, *, eps: float = 1e-3,
     """
     g = torch.Generator(device="cpu").manual_seed(seed)
     delta = (eps * torch.randn(x0.shape, generator=g)).to(x0.device, x0.dtype)
-    dn = max(float(delta.norm()), _EPS)
+    dn = delta.norm().clamp_min(_EPS)
 
     xa, xb = x0.clone(), x0.clone()
-    gain, norm = [], []
+    gain_t, norm_t = [], []
     for i, layer in enumerate(layers):
         if i == inject_at:
             xb = xb + delta
         xa = layer(xa, **layer_kw)
         xb = layer(xb, **layer_kw)
-        gain.append(float((xb - xa).norm()) / dn)
-        norm.append(float(xa.norm()))
+        gain_t.append((xb - xa).norm() / dn)
+        norm_t.append(xa.norm())
+    # Defer host reads so CUDA does not synchronize twice per layer.
+    gain = torch.stack(gain_t).cpu().tolist() if gain_t else []
+    norm = torch.stack(norm_t).cpu().tolist() if norm_t else []
     return {
         "gain_by_layer": gain,
         "norm_by_layer": norm,

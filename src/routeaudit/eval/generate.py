@@ -1,30 +1,31 @@
 """Generation with a pluggable router mutator, via `MoEHookManager`."""
+
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
 
 import torch
 
 from ..model.hooks import MoEHookManager
 
-RouterMutator = Callable[[torch.Tensor, int, int], torch.Tensor]   # (logits, layer, step) -> logits
+RouterMutator = Callable[[torch.Tensor, int, int], torch.Tensor]  # (logits, layer, step) -> logits
 
 
 @dataclass
 class DefenseBundle:
     """Holds an optional router mutator, wired into generation via `MoEHookManager`."""
 
-    router_mutator: Optional[RouterMutator] = None
+    router_mutator: RouterMutator | None = None
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def generate_with_defense(
     model,
     tokenizer,
     prompt: str,
     *,
-    defense: DefenseBundle = DefenseBundle(),
+    defense: DefenseBundle | None = None,
     max_new_tokens: int = 128,
     do_sample: bool = False,
     temperature: float = 1.0,
@@ -39,6 +40,8 @@ def generate_with_defense(
     tokens, leaving nothing to segment the answer from the trace with.
     """
     from ..model.prompting import encode_prompt
+
+    defense = defense or DefenseBundle()
     device = device or next(model.parameters()).device
     ids = encode_prompt(tokenizer, prompt, want_template=want_template, device=device).unsqueeze(0)
 
@@ -46,10 +49,13 @@ def generate_with_defense(
         if defense.router_mutator is not None:
             hm.set_router_mutator(defense.router_mutator)
 
-        out_ids = ids
+        # Keep generated steps separately. Repeatedly concatenating the full sequence
+        # makes long reasoning traces quadratic in copied token ids; with a KV cache
+        # the model only needs the previous token after the first step.
+        generated: list[torch.Tensor] = []
         past_key_values = None
         for _ in range(max_new_tokens):
-            step_input = out_ids[:, -1:] if past_key_values is not None else out_ids
+            step_input = generated[-1] if past_key_values is not None else ids
             outputs = model(
                 input_ids=step_input,
                 past_key_values=past_key_values,
@@ -62,12 +68,12 @@ def generate_with_defense(
                 next_id = torch.multinomial(probs, 1)
             else:
                 next_id = next_logits.argmax(-1, keepdim=True)
-            out_ids = torch.cat([out_ids, next_id], dim=-1)
+            generated.append(next_id)
             hm.advance_step()
             if tokenizer.eos_token_id is not None and int(next_id.item()) == tokenizer.eos_token_id:
                 break
 
-    new_ids = out_ids[0, ids.shape[1]:].tolist()
+    new_ids = torch.cat(generated, dim=-1)[0].tolist() if generated else []
     if new_ids and tokenizer.eos_token_id is not None and new_ids[-1] == tokenizer.eos_token_id:
         new_ids = new_ids[:-1]
     if return_ids:
@@ -75,7 +81,7 @@ def generate_with_defense(
     return tokenizer.decode(new_ids, skip_special_tokens=True)
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def generate_batch(
     model,
     tokenizer,
@@ -84,6 +90,8 @@ def generate_batch(
     max_new_tokens: int = 128,
     do_sample: bool = False,
     temperature: float = 1.0,
+    top_p: float | None = None,
+    top_k: int | None = None,
     device: str | torch.device | None = None,
     batch_size: int = 8,
     want_template: bool = True,
@@ -105,13 +113,24 @@ def generate_batch(
     when they are special tokens — the text alone can't be segmented afterwards. Use
     `generate_batch_ids` for anything thinking-aware.
     """
-    ids = generate_batch_ids(model, tokenizer, prompts, max_new_tokens=max_new_tokens,
-                             do_sample=do_sample, temperature=temperature, device=device,
-                             batch_size=batch_size, want_template=want_template, desc=desc)
+    ids = generate_batch_ids(
+        model,
+        tokenizer,
+        prompts,
+        max_new_tokens=max_new_tokens,
+        do_sample=do_sample,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        device=device,
+        batch_size=batch_size,
+        want_template=want_template,
+        desc=desc,
+    )
     return [tokenizer.decode(x, skip_special_tokens=True) for x in ids]
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def generate_batch_ids(
     model,
     tokenizer,
@@ -120,6 +139,8 @@ def generate_batch_ids(
     max_new_tokens: int = 128,
     do_sample: bool = False,
     temperature: float = 1.0,
+    top_p: float | None = None,
+    top_k: int | None = None,
     device: str | torch.device | None = None,
     batch_size: int = 8,
     want_template: bool = True,
@@ -141,14 +162,22 @@ def generate_batch_ids(
     templated = use_template(tokenizer, want_template)
 
     prev_side = tokenizer.padding_side
-    if tokenizer.pad_token_id is None:        # decoder-only tokenizers often lack a pad token
-        tokenizer.pad_token = tokenizer.eos_token   # standard, harmless to leave set
+    if tokenizer.pad_token_id is None:  # decoder-only tokenizers often lack a pad token
+        tokenizer.pad_token = tokenizer.eos_token  # standard, harmless to leave set
     tokenizer.padding_side = "left"
 
-    gen_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=do_sample,
-                      pad_token_id=tokenizer.pad_token_id, use_cache=True)
+    gen_kwargs = {
+        "max_new_tokens": max_new_tokens,
+        "do_sample": do_sample,
+        "pad_token_id": tokenizer.pad_token_id,
+        "use_cache": True,
+    }
     if do_sample:
-        gen_kwargs["temperature"] = temperature   # only pass when sampling (avoids a warning)
+        gen_kwargs["temperature"] = temperature  # only pass when sampling (avoids a warning)
+        if top_p is not None:
+            gen_kwargs["top_p"] = top_p
+        if top_k is not None:
+            gen_kwargs["top_k"] = top_k
 
     eos_id = tokenizer.eos_token_id
     pad_id = tokenizer.pad_token_id
@@ -156,14 +185,15 @@ def generate_batch_ids(
 
     out_ids: list[list[int]] = []
     try:
-        chunks = [prompts[i:i + batch_size] for i in range(0, len(prompts), batch_size)]
+        chunks = [prompts[i : i + batch_size] for i in range(0, len(prompts), batch_size)]
         with ui.progress_bar(len(prompts), desc=desc) as (prog, tid):
             for chunk in chunks:
                 rendered = [render_user_turn(tokenizer, c, want_template=want_template) for c in chunk]
-                enc = tokenizer(rendered, return_tensors="pt", padding=True,
-                                add_special_tokens=not templated).to(device)
+                enc = tokenizer(
+                    rendered, return_tensors="pt", padding=True, add_special_tokens=not templated
+                ).to(device)
                 out = model.generate(**enc, **gen_kwargs)
-                new = out[:, enc["input_ids"].shape[1]:]          # drop the (left-padded) prompt
+                new = out[:, enc["input_ids"].shape[1] :]  # drop the (left-padded) prompt
                 for row in new.tolist():
                     # Cut at the first EOS/pad: everything after it is batch padding,
                     # and counting it would inflate every think-length statistic.

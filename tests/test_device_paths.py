@@ -1,0 +1,167 @@
+"""Device and allocation-sensitive checks for GPU-facing utility paths."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from routeaudit.eval import generate as generate_mod
+from routeaudit.identify.activation_freq import _expert_membership_counts
+from routeaudit.model import gate_math, mhc
+from routeaudit.model.gate_math import GateSpec
+from routeaudit.model.loader import _resolve_dtype
+from routeaudit.model.thinking import OK, Anchor, segment_masks
+
+DEVICES = [torch.device("cpu")]
+if torch.cuda.is_available():
+    DEVICES.append(torch.device("cuda"))
+
+
+def test_loader_auto_dtype_honors_prequantized_checkpoint_metadata():
+    assert _resolve_dtype(SimpleNamespace(dtype="auto")) == "auto"
+
+
+def test_grouped_gate_excludes_masked_experts_even_with_negative_bias():
+    spec = GateSpec(
+        scoring_func="sigmoid",
+        top_k=1,
+        use_bias=True,
+        n_group=2,
+        topk_group=1,
+    )
+    # Group 0 wins the group contest even though all biased scores are negative.
+    # A finite zero sentinel would then let an excluded group-1 expert re-enter.
+    scores = torch.tensor([[0.9, 0.8, 0.7, 0.6]])
+    bias = torch.tensor([[-1.0, -1.0, -2.0, -2.0]])
+    selected = gate_math.select(scores, bias, spec)
+
+    assert selected.item() in (0, 1)
+
+
+def test_grouped_gate_matches_transformers_5_9_reference():
+    v3 = pytest.importorskip("transformers.models.deepseek_v3.modeling_deepseek_v3")
+    cfg = v3.DeepseekV3Config(
+        hidden_size=16,
+        n_routed_experts=8,
+        num_experts_per_tok=2,
+        n_group=2,
+        topk_group=1,
+        norm_topk_prob=True,
+        routed_scaling_factor=2.5,
+    )
+    reference = v3.DeepseekV3TopkRouter(cfg).eval()
+    torch.manual_seed(1)
+    with torch.no_grad():
+        reference.weight.normal_(0, 0.5)
+        reference.e_score_correction_bias.normal_(-0.5, 0.2)
+        logits, weights, indices = reference(torch.randn(12, cfg.hidden_size))
+
+    spec = GateSpec(
+        scoring_func="sigmoid",
+        top_k=cfg.num_experts_per_tok,
+        use_bias=True,
+        n_group=cfg.n_group,
+        topk_group=cfg.topk_group,
+        norm_topk_prob=cfg.norm_topk_prob,
+        routed_scaling_factor=cfg.routed_scaling_factor,
+    )
+    actual = gate_math.route(logits, reference.e_score_correction_bias, spec)
+    dense_reference = torch.zeros_like(logits).scatter_(1, indices, weights)
+
+    assert torch.equal(actual.indices.sort(-1).values, indices.sort(-1).values)
+    assert torch.allclose(actual.dense, dense_reference, atol=1e-6)
+
+
+@pytest.mark.parametrize("device", DEVICES, ids=str)
+def test_expert_membership_counting_stays_on_device_and_matches_dense(device):
+    idx = torch.tensor(
+        [[[0, 2], [1, 3], [0, 1]], [[2, 3], [0, 3], [1, 2]]],
+        device=device,
+    )
+    mask = torch.tensor([[True, False, True], [False, True, True]], device=device)
+
+    actual = _expert_membership_counts(idx, mask, n_experts=4)
+    dense = torch.zeros(2, 3, 4, dtype=torch.bool, device=device)
+    dense.scatter_(-1, idx, True)
+    expected = (dense & mask.unsqueeze(-1)).sum((0, 1))
+
+    assert actual.device == device
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize("device", DEVICES, ids=str)
+def test_thinking_masks_can_be_created_on_generation_device(device):
+    anchor = Anchor(answer_onset=4, think_span=(1, 3), status=OK, n_generated=6)
+    think, answer = segment_masks(anchor, device=device)
+    assert think.device == answer.device == device
+    assert think.tolist() == [False, True, True, False, False, False]
+    assert answer.tolist() == [False, False, False, False, True, True]
+
+
+@pytest.mark.parametrize("device", DEVICES, ids=str)
+def test_mhc_primitives_preserve_device_and_match_einsum_reference(device):
+    torch.manual_seed(0)
+    x = torch.randn(2, 5, 4, 8, device=device)
+    a = torch.randn(2, 5, 4, device=device)
+    b = torch.randn(2, 5, 4, 4, device=device)
+    c = torch.randn(2, 5, 4, device=device)
+    h = torch.randn(2, 5, 8, device=device)
+
+    down = mhc.mix_down(a, x)
+    residual = mhc.mix_residual(b, x)
+    written = mhc.write_back(c, h)
+
+    assert down.device == residual.device == written.device == device
+    assert torch.allclose(down, torch.einsum("btn,btnd->btd", a, x))
+    assert torch.allclose(residual, torch.einsum("btnm,btmd->btnd", b, x))
+    assert torch.allclose(written, torch.einsum("btn,btd->btnd", c, h))
+
+
+def test_custom_generation_reuses_only_last_token_after_cache(monkeypatch):
+    class NoOpHooks:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def advance_step(self):
+            pass
+
+        def set_router_mutator(self, _fn):
+            pass
+
+    class FakeModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.marker = torch.nn.Parameter(torch.zeros(()))
+            self.input_lengths = []
+
+        def forward(self, input_ids, past_key_values=None, use_cache=True):
+            self.input_lengths.append(input_ids.shape[1])
+            chosen = 3 if len(self.input_lengths) == 1 else 4
+            logits = torch.zeros(1, input_ids.shape[1], 8)
+            logits[:, -1, chosen] = 1
+            return SimpleNamespace(logits=logits, past_key_values=object())
+
+    monkeypatch.setattr(generate_mod, "MoEHookManager", NoOpHooks)
+    monkeypatch.setattr(
+        "routeaudit.model.prompting.encode_prompt",
+        lambda *_args, **_kwargs: torch.tensor([7, 6, 5]),
+    )
+    tokenizer = SimpleNamespace(eos_token_id=4)
+    model = FakeModel()
+
+    ids = generate_mod.generate_with_defense(model, tokenizer, "prompt", max_new_tokens=10, return_ids=True)
+
+    assert ids == [3]
+    assert model.input_lengths == [3, 1]

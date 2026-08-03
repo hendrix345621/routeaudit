@@ -25,11 +25,12 @@ Non-think is the degenerate case, not a separate code path: a model that emits
 `</think>` immediately has `answer_onset == 1`, and a model with no thinking at all
 has `answer_onset == 0`. One implementation covers all three.
 """
+
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 
 import torch
 
@@ -43,9 +44,9 @@ _CLOSE_RE = re.compile(r"</think(?:ing)?>", re.IGNORECASE)
 
 # Anchor.status values.
 OK = "ok"
-MALFORMED = "malformed"                 # nested/repeated tags; still scoreable
-TRUNCATED = "truncated_in_think"        # budget ran out mid-trace; NOT scoreable
-NO_THINK = "no_think"                   # no trace at all (non-reasoning generation)
+MALFORMED = "malformed"  # nested/repeated tags; still scoreable
+TRUNCATED = "truncated_in_think"  # budget ran out mid-trace; NOT scoreable
+NO_THINK = "no_think"  # no trace at all (non-reasoning generation)
 
 
 @dataclass(frozen=True)
@@ -69,12 +70,12 @@ class ThinkSpec:
         return self.close_id is not None
 
     @classmethod
-    def from_tokenizer(cls, tokenizer) -> "ThinkSpec":
+    def from_tokenizer(cls, tokenizer) -> ThinkSpec:
         def _resolve(candidates):
             for s in candidates:
                 try:
                     tid = tokenizer.convert_tokens_to_ids(s)
-                except Exception:
+                except Exception:  # noqa: BLE001, S112 - third-party tokenizers vary
                     continue
                 if tid is None:
                     continue
@@ -102,7 +103,7 @@ class Anchor:
     """
 
     answer_onset: int | None
-    think_span: tuple[int, int]          # [start, end) over generated ids; empty if no trace
+    think_span: tuple[int, int]  # [start, end) over generated ids; empty if no trace
     status: str
     n_generated: int = 0
 
@@ -140,9 +141,8 @@ def locate_answer(gen_ids: Sequence[int], spec: ThinkSpec) -> Anchor:
             return Anchor(None, (0, n), TRUNCATED, n)
         return Anchor(0, (0, 0), NO_THINK, n)
 
-    end = ends[0]                        # first close wins; later ones are trace content
-    starts = ([i for i, t in enumerate(gen_ids[:end]) if t == spec.open_id]
-              if spec.open_id is not None else [])
+    end = ends[0]  # first close wins; later ones are trace content
+    starts = [i for i, t in enumerate(gen_ids[:end]) if t == spec.open_id] if spec.open_id is not None else []
     status = MALFORMED if (len(ends) > 1 or len(starts) > 1) else OK
 
     think_start = (starts[0] + 1) if starts else 0
@@ -165,7 +165,7 @@ def locate_answer_text(text: str) -> tuple[str, str, str]:
         return (text, "", TRUNCATED) if opened else ("", text, NO_THINK)
     think = text[: m.start()]
     think = re.sub(r"^\s*<think(?:ing)?>", "", think, flags=re.IGNORECASE)
-    answer = text[m.end():]
+    answer = text[m.end() :]
     status = MALFORMED if len(_CLOSE_RE.findall(text)) > 1 else OK
     return think, answer, status
 
@@ -180,20 +180,25 @@ def strip_think_text(text: str) -> str:
     return _THINK_RE.sub("", text)
 
 
-def segment_masks(anchor: Anchor, gen_len: int | None = None):
+def segment_masks(
+    anchor: Anchor,
+    gen_len: int | None = None,
+    *,
+    device: torch.device | str | None = None,
+):
     """Boolean (think, answer) masks over generated positions.
 
     The two never overlap and the delimiter itself belongs to neither, so
     `think | answer` is not all-ones — that gap is the point.
     """
     n = gen_len if gen_len is not None else anchor.n_generated
-    think = torch.zeros(n, dtype=torch.bool)
-    answer = torch.zeros(n, dtype=torch.bool)
+    think = torch.zeros(n, dtype=torch.bool, device=device)
+    answer = torch.zeros(n, dtype=torch.bool, device=device)
     s, e = anchor.think_span
     if e > s:
-        think[s:min(e, n)] = True
+        think[s : min(e, n)] = True
     if anchor.answer_onset is not None:
-        answer[min(anchor.answer_onset, n):] = True
+        answer[min(anchor.answer_onset, n) :] = True
     return think, answer
 
 
@@ -239,9 +244,11 @@ class FormatAudit:
 
     def message(self) -> str:
         want = "ON" if self.requested_thinking else "OFF"
-        return (f"thinking requested {want}: {self.n_with_trace}/{self.n_generations} generations "
-                f"had a trace (mean {self.mean_think_tokens:.0f} think tokens, "
-                f"{self.truncation_rate:.0%} truncated)")
+        return (
+            f"thinking requested {want}: {self.n_with_trace}/{self.n_generations} generations "
+            f"had a trace (mean {self.mean_think_tokens:.0f} think tokens, "
+            f"{self.truncation_rate:.0%} truncated)"
+        )
 
 
 # ─────────────────────── A2: compliant-thought targets ───────────────────────
@@ -260,8 +267,7 @@ _DEFAULT_THOUGHT = (
 )
 
 
-def build_thought_target(tokenizer, *, thought: str | None = None,
-                         want_template: bool = True) -> str:
+def build_thought_target(tokenizer, *, thought: str | None = None, want_template: bool = True) -> str:
     """Construct one A2 target string, prefixing `<think>` only if the template does
     not already emit it in the generation prompt.
 
@@ -286,13 +292,11 @@ def build_thought_target(tokenizer, *, thought: str | None = None,
     return body if already_open else f"{spec.open_str}\n{body}"
 
 
-def build_thought_targets(tokenizer, prompts, *, thoughts=None,
-                          want_template: bool = True) -> list[str]:
+def build_thought_targets(tokenizer, prompts, *, thoughts=None, want_template: bool = True) -> list[str]:
     """Per-prompt A2 targets. `thoughts` (aligned with `prompts`) overrides the default
     generic opener when a prompt-specific compliant framing is available."""
     thoughts = thoughts or [None] * len(prompts)
-    return [build_thought_target(tokenizer, thought=t, want_template=want_template)
-            for t in thoughts]
+    return [build_thought_target(tokenizer, thought=t, want_template=want_template) for t in thoughts]
 
 
 def audit_format(anchors: Sequence[Anchor], *, requested_thinking: bool) -> FormatAudit:
@@ -359,5 +363,11 @@ class ScoredBatch:
 
     def as_dict(self) -> dict:
         lo, hi = self.bounds
-        return {"rate": self.rate, "n_total": self.n_total, "n_scored": self.n_scored,
-                "truncation_rate": self.truncation_rate, "rate_lo": lo, "rate_hi": hi}
+        return {
+            "rate": self.rate,
+            "n_total": self.n_total,
+            "n_scored": self.n_scored,
+            "truncation_rate": self.truncation_rate,
+            "rate_lo": lo,
+            "rate_hi": hi,
+        }

@@ -29,13 +29,14 @@ each tiny forward in milliseconds, then sat idle while Python set up the next on
   - **Truncates responses** to `max_response_tokens` so the long tail doesn't
     dominate wall-time.
 
-Memory cost: peak VRAM scales with `batch_size * max_total_tokens * n_experts`
-(a bool top-k mask, processed one layer at a time) — a few MB at the defaults.
+Membership-count memory scales with `batch_size * counted_tokens * top_k`, not
+`batch_size * max_total_tokens * n_experts`; no dense expert mask is materialised.
 Lower `batch_size` if VRAM is tight."""
+
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 import torch
 
@@ -57,7 +58,24 @@ class ExpertFreq:
         return float(self.freq[layer, expert])
 
 
-@torch.no_grad()
+def _expert_membership_counts(
+    indices: torch.Tensor,
+    count_mask: torch.Tensor,
+    n_experts: int,
+) -> torch.Tensor:
+    """Count selected ids without materialising a dense ``(B, T, E)`` mask.
+
+    Top-k selection contains unique expert ids per token. Selecting only counted
+    rows and applying ``bincount`` reduces temporary storage from ``B*T*E`` values
+    to ``counted_tokens*K`` and keeps the calculation on the input device.
+    """
+    selected = indices[count_mask]
+    if selected.numel() == 0:
+        return torch.zeros(n_experts, dtype=torch.int64, device=indices.device)
+    return torch.bincount(selected.reshape(-1), minlength=n_experts)
+
+
+@torch.inference_mode()
 def compute_expert_freq(
     model: torch.nn.Module,
     tokenizer,
@@ -123,8 +141,7 @@ def compute_expert_freq(
             continue
         # Render the query through the chat template (query + assistant marker are
         # the CONTEXT to mask); count only the requested response span (Eq. 3, §5.1).
-        s = profiling_spans(tokenizer, prompt, response, span=span,
-                            want_template=use_chat_template)
+        s = profiling_spans(tokenizer, prompt, response, span=span, want_template=use_chat_template)
         ids, mask, n_ctx = s.ids, s.mask, s.n_ctx
         if ids.shape[0] <= n_ctx:
             continue
@@ -150,10 +167,10 @@ def compute_expert_freq(
             keep_n = max_total_tokens - n_ctx
             if keep_n <= 0:
                 continue
-            trimmed_mask = torch.cat([mask[:n_ctx], mask[n_ctx:n_ctx + keep_n]])
+            trimmed_mask = torch.cat([mask[:n_ctx], mask[n_ctx : n_ctx + keep_n]])
             if not bool(trimmed_mask.any()):
                 continue
-            ids = torch.cat([ids[:n_ctx], ids[n_ctx:n_ctx + keep_n]])
+            ids = torch.cat([ids[:n_ctx], ids[n_ctx : n_ctx + keep_n]])
             mask = trimmed_mask
 
         if not bool(mask.any()):
@@ -164,23 +181,28 @@ def compute_expert_freq(
         prepped.append((ids, mask))
 
     if n_dropped_empty:
-        ui.warn(f"{desc}: dropped {n_dropped_empty} sequence(s) with no tokens in span "
-                f"'{span}' (typically a trace that never reached `</think>`). They are "
-                f"excluded from F, not counted as zeros.")
+        ui.warn(
+            f"{desc}: dropped {n_dropped_empty} sequence(s) with no tokens in span "
+            f"'{span}' (typically a trace that never reached `</think>`). They are "
+            f"excluded from F, not counted as zeros."
+        )
     if not prepped:
         raise RuntimeError(
             f"No valid sequences after tokenization (span={span!r}). If this is a "
             f"thinking-mode corpus, check the responses still contain their "
-            f"`<think>…</think>` markup — stripping it leaves nothing to segment.")
+            f"`<think>…</think>` markup — stripping it leaves nothing to segment."
+        )
 
     # Sort longest-first so each batch pads to a similar length (minimal waste).
     # Counting order is irrelevant — we only accumulate sums.
     prepped.sort(key=lambda p: p[0].shape[0], reverse=True)
-    batches = [prepped[i:i + batch_size] for i in range(0, len(prepped), batch_size)]
+    batches = [prepped[i : i + batch_size] for i in range(0, len(prepped), batch_size)]
 
     # ── 2) GPU-resident accumulators. Sync to CPU only at the end. ──
-    counts = torch.zeros(n_layers, n_experts, dtype=torch.float64, device=device)
-    total_tokens = torch.zeros((), dtype=torch.float64, device=device)
+    # Counts are integers. Keeping them int64 avoids slow FP64 accumulation on
+    # consumer GPUs; convert the small final (L,E) result on CPU once at the end.
+    counts = torch.zeros(n_layers, n_experts, dtype=torch.int64, device=device)
+    total_tokens = torch.zeros((), dtype=torch.int64, device=device)
 
     # ── 3) One persistent hook manager; one forward per batch. ──
     # Call the BASE transformer (model.model), not the causal-LM wrapper: the router
@@ -194,7 +216,8 @@ def compute_expert_freq(
     # tensor at all (V4 returns `(weights, indices)` — top-k-ing that would count over
     # `top_k` phantom "experts" rather than the real E). So recompute the selection.
     use_selection = gate_spec is not None and (
-        getattr(spec, "router_output", "") == "recompute" or not gate_spec.is_plain_topk)
+        getattr(spec, "router_output", "") == "recompute" or not gate_spec.is_plain_topk
+    )
 
     fwd = getattr(model, "model", model)
     with MoEHookManager(model, spec) as hm:
@@ -231,9 +254,7 @@ def compute_expert_freq(
                 # so they stay at zero and are masked out before expert selection.
                 for layer, sel_idx in hm.capture.expert_indices.items():
                     idx = sel_idx.view(B, T_pad, -1)
-                    tk = torch.zeros(B, T_pad, n_experts, dtype=torch.bool, device=device)
-                    tk.scatter_(-1, idx, True)
-                    counts[layer] += (tk & count_mask.unsqueeze(-1)).sum(dim=(0, 1)).double()
+                    counts[layer] += _expert_membership_counts(idx, count_mask, n_experts)
             else:
                 for layer, logits in hm.capture.router_logits.items():
                     E = logits.shape[-1]
@@ -245,19 +266,17 @@ def compute_expert_freq(
                             f"it would count over {E} positions as if they were experts. "
                             f"Pass a `gate_spec` (GateSpec.from_config(cfg.model)) so the "
                             f"selection is recomputed through the real gate; check that the "
-                            f"config's `routing:` block and `arch.router_output` are set.")
-                    lg = logits.view(B, T_pad, E)                          # un-flatten B*T
+                            f"config's `routing:` block and `arch.router_output` are set."
+                        )
+                    lg = logits.view(B, T_pad, E)  # un-flatten B*T
                     _, idx = lg.topk(top_k, dim=-1)
-                    tk = torch.zeros_like(lg, dtype=torch.bool)
-                    tk.scatter_(-1, idx, True)                             # (B, T_pad, E) top-k mask
-                    # Zero out prompt + padding positions, then sum over (B, T_pad).
-                    counts[layer] += (tk & count_mask.unsqueeze(-1)).sum(dim=(0, 1)).double()
+                    counts[layer] += _expert_membership_counts(idx, count_mask, n_experts)
 
-            total_tokens += count_mask.sum().double()
+            total_tokens += count_mask.sum()
 
     n_resp = int(total_tokens.item())
     if n_resp == 0:
         raise RuntimeError("No response tokens were counted — check your sequences.")
     # Single CPU sync at the very end.
-    freq = (counts / float(n_resp)).cpu()
+    freq = counts.cpu().to(torch.float64).div_(n_resp)
     return ExpertFreq(freq=freq, n_tokens=n_resp)

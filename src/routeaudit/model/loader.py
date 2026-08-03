@@ -1,6 +1,7 @@
 """MoE model loader. Architecture-agnostic: the module layout is described by an
 :class:`ArchSpec` (attached to the returned :class:`LoadedModel`) and consumed by
 the hooks in `hooks.py`. Presets exist for OLMoE and Mixtral."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ class LoadedModel:
     model: torch.nn.Module
     tokenizer: object
     cfg: SimpleNamespace  # the model config slice, not the global config
-    spec: ArchSpec        # how to reach the router/experts for this family
+    spec: ArchSpec  # how to reach the router/experts for this family
 
 
 _DTYPES = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
@@ -35,15 +36,22 @@ def _resolve_dtype(model_ns):
     name = str(getattr(model_ns, "dtype", "bfloat16"))
     if name in _DTYPES:
         return _DTYPES[name]
+    if name == "auto":
+        ui.info("dtype 'auto': honoring the checkpoint's own dtype metadata.")
+        return "auto"
     from .precision import native_precision
+
     if native_precision(model_ns):
-        ui.info(f"dtype '{name}' is the checkpoint's native precision (QAT) — "
-                f"loading as-shipped with torch_dtype='auto'.")
+        ui.info(
+            f"dtype '{name}' is the checkpoint's native precision (QAT) — "
+            f"loading as-shipped with torch_dtype='auto'."
+        )
         return "auto"
     raise ValueError(
         f"model.dtype='{name}' is not a supported load dtype. Use one of "
         f"{sorted(_DTYPES)}, or a native low-precision name (fp8/fp4/...) for a "
-        f"checkpoint that ships quantized.")
+        f"checkpoint that ships quantized."
+    )
 
 
 def _coerce_max_memory(mm):
@@ -54,7 +62,7 @@ def _coerce_max_memory(mm):
     items = vars(mm).items() if isinstance(mm, SimpleNamespace) else dict(mm).items()
     out = {}
     for k, v in items:
-        key = int(k) if str(k).lstrip("-").isdigit() else str(k)   # "0"→0, "cpu"→"cpu"
+        key = int(k) if str(k).lstrip("-").isdigit() else str(k)  # "0"→0, "cpu"→"cpu"
         out[key] = v
     return out or None
 
@@ -64,12 +72,12 @@ def _load_opts(model_ns) -> dict:
     (it would perturb the router logits harvest localizes and the attack depends on)."""
     lo = getattr(model_ns, "load", None)
     g = (lambda k, d=None: getattr(lo, k, d)) if lo is not None else (lambda k, d=None: d)
-    return dict(
-        attn_implementation=g("attn_implementation", "sdpa"),
-        max_memory=_coerce_max_memory(g("max_memory")),
-        offload_folder=g("offload_folder"),
-        offload_state_dict=bool(g("offload_state_dict", False)),
-    )
+    return {
+        "attn_implementation": g("attn_implementation", "sdpa"),
+        "max_memory": _coerce_max_memory(g("max_memory")),
+        "offload_folder": g("offload_folder"),
+        "offload_state_dict": bool(g("offload_state_dict", False)),
+    }
 
 
 def load_model(cfg) -> LoadedModel:
@@ -77,7 +85,7 @@ def load_model(cfg) -> LoadedModel:
     tok = AutoTokenizer.from_pretrained(cfg.model.hf_id, trust_remote_code=True)
     opts = _load_opts(cfg.model)
 
-    kwargs = dict(torch_dtype=dtype, device_map=cfg.model.device_map, trust_remote_code=True)
+    kwargs = {"torch_dtype": dtype, "device_map": cfg.model.device_map, "trust_remote_code": True}
     if opts["max_memory"]:
         kwargs["max_memory"] = opts["max_memory"]
     if opts["offload_folder"]:
@@ -86,8 +94,7 @@ def load_model(cfg) -> LoadedModel:
 
     impl = opts["attn_implementation"]
     try:
-        model = AutoModelForCausalLM.from_pretrained(
-            cfg.model.hf_id, attn_implementation=impl, **kwargs)
+        model = AutoModelForCausalLM.from_pretrained(cfg.model.hf_id, attn_implementation=impl, **kwargs)
         if impl:
             ui.info(f"attention impl: {impl}")
     except (TypeError, ValueError) as e:
@@ -101,10 +108,10 @@ def load_model(cfg) -> LoadedModel:
     # Honor chat-template options (e.g. enable_thinking: false on Qwen3 reasoning
     # models) across every phase that renders prompts.
     from . import prompting
+
     prompting.set_chat_template_kwargs(_chat_template_kwargs(cfg.model))
 
-    return LoadedModel(model=model, tokenizer=tok, cfg=cfg.model,
-                       spec=ArchSpec.from_config(cfg.model))
+    return LoadedModel(model=model, tokenizer=tok, cfg=cfg.model, spec=ArchSpec.from_config(cfg.model))
 
 
 def _chat_template_kwargs(model_ns) -> dict:
@@ -142,8 +149,8 @@ def disable_grad_checkpointing(model) -> None:
         model.gradient_checkpointing_disable()
         if hasattr(model, "config"):
             model.config.use_cache = True
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        ui.warn(f"could not disable gradient checkpointing ({type(e).__name__}: {e})")
 
 
 def _report_placement(model) -> None:
@@ -168,7 +175,7 @@ def _report_placement(model) -> None:
             "activations over PCIe — this is the usual cause of 10-100× slow "
             "harvest / routeaudit stages. Fix: fit the model on one GPU (a 24 GB+ "
             "card for OLMoE-1B-7B), or set `model.device_map` to a single device "
-            "like \"cuda:0\". A bigger RAM disk does NOT help — this is VRAM, not disk."
+            'like "cuda:0". A bigger RAM disk does NOT help — this is VRAM, not disk.'
         )
     else:
         ui.info(f"model placement: {summary} (fully on accelerator)")

@@ -8,6 +8,7 @@
                          supported routed-expert MoE it raises `UnsupportedModelError`
                          with an explanation.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -35,14 +36,16 @@ MODELS: dict[str, str] = {
     "qwen2_moe": "configs/qwen2_moe.yaml",
     "qwen3": "configs/qwen3_moe.yaml",
     "qwen3_moe": "configs/qwen3_moe.yaml",
+    "qwen3-think-smoke": "configs/qwen3_30b_a3b_fp8_think_smoke.yaml",
+    "qwen3_think_smoke": "configs/qwen3_30b_a3b_fp8_think_smoke.yaml",
     "qwen3-235b": "configs/qwen3_235b_a22b.yaml",
     "qwen3_235b": "configs/qwen3_235b_a22b.yaml",
     "qwen3-235b-a22b": "configs/qwen3_235b_a22b.yaml",
-    "qwen3.5": "configs/qwen3_5_moe.yaml",        # best-effort / unverified — see the config header
+    "qwen3.5": "configs/qwen3_5_moe.yaml",  # best-effort / unverified — see the config header
     "qwen3_5": "configs/qwen3_5_moe.yaml",
-    "qwen3.6": "configs/qwen3_6_35b_a3b.yaml",     # dims verified from config.json (hybrid attention)
+    "qwen3.6": "configs/qwen3_6_35b_a3b.yaml",  # dims verified from config.json (hybrid attention)
     "qwen3_6": "configs/qwen3_6_35b_a3b.yaml",
-    "qwen3.6-think": "configs/qwen3_6_35b_a3b_think.yaml",   # same model, thinking mode ON (A2 attack)
+    "qwen3.6-think": "configs/qwen3_6_35b_a3b_think.yaml",  # same model, thinking mode ON (A2 attack)
     "qwen3_6_think": "configs/qwen3_6_35b_a3b_think.yaml",
     # DeepSeekMoE. V2-Lite is the cheap sibling used to exercise the grouped-gate path;
     # V4-Flash is the mHC target (sqrtsoftplus + flat top-6 + hash-routed first layers).
@@ -79,9 +82,7 @@ def resolve_config_path(spec: str | Path) -> Path:
     cand2 = _REPO_ROOT / "configs" / f"{key}.yaml"
     if cand2.exists():
         return cand2
-    raise FileNotFoundError(
-        f"config '{spec}' not found. Use a path, or a model nickname: {list_models()}."
-    )
+    raise FileNotFoundError(f"config '{spec}' not found. Use a path, or a model nickname: {list_models()}.")
 
 
 # ─────────────────────── HuggingFace model-id auto-detection ───────────────────────
@@ -92,10 +93,10 @@ _HF_TYPE_TO_PRESET: dict[str, str] = {
     "olmoe": "olmoe",
     "mixtral": "mixtral",
     "qwen2_moe": "qwen",
-    "qwen3_moe": "qwen",       # covers Qwen3-30B-A3B, Qwen3-235B-A22B
-    "qwen3_next": "qwen",      # best-effort: Qwen3-Next hybrid MoE (standard Linear gate)
-    "qwen3_5_moe": "qwen",     # Qwen3.5 / Qwen3.6 hybrid-attention MoE (every layer has a standard
-                              # MoE mlp; linear/full attention sublayers don't affect router capture)
+    "qwen3_moe": "qwen",  # covers Qwen3-30B-A3B, Qwen3-235B-A22B
+    "qwen3_next": "qwen",  # best-effort: Qwen3-Next hybrid MoE (standard Linear gate)
+    "qwen3_5_moe": "qwen",  # Qwen3.5 / Qwen3.6 hybrid-attention MoE (every layer has a standard
+    # MoE mlp; linear/full attention sublayers don't affect router capture)
     "lfm2_moe": "lfm2",
     "phimoe": "phimoe",
     # DeepSeekMoE. The gate is not a softmax — its semantics come from the `routing:`
@@ -111,9 +112,15 @@ _HF_TYPE_TO_PRESET: dict[str, str] = {
 _ROUTING_DEFAULTS: dict[str, dict] = {
     "deepseek_v2": dict(scoring_func="sigmoid", use_bias=True, norm_topk_prob=True),
     "deepseek_v3": dict(scoring_func="sigmoid", use_bias=True, norm_topk_prob=True),
-    "deepseek_v4": dict(scoring_func="sqrtsoftplus", use_bias=True, norm_topk_prob=True,
-                        n_group=1, topk_group=0, routed_scaling_factor=1.5,
-                        num_hash_layers=3),
+    "deepseek_v4": dict(
+        scoring_func="sqrtsoftplus",
+        use_bias=True,
+        norm_topk_prob=True,
+        n_group=1,
+        topk_group=0,
+        routed_scaling_factor=1.5,
+        num_hash_layers=3,
+    ),
 }
 
 
@@ -145,7 +152,8 @@ def _routing_ns_from_hf(hf_cfg, mt: str, top_k: int) -> SimpleNamespace | None:
         topk_group=int(_hf_get(hf_cfg, "topk_group", default=defaults.get("topk_group", 0)) or 0),
         first_k_dense_replace=int(_hf_get(hf_cfg, "first_k_dense_replace", default=0) or 0),
         num_hash_layers=int(
-            _hf_get(hf_cfg, "num_hash_layers", default=defaults.get("num_hash_layers", 0)) or 0),
+            _hf_get(hf_cfg, "num_hash_layers", default=defaults.get("num_hash_layers", 0)) or 0
+        ),
     )
     for key, names in (
         ("scoring_func", ("scoring_func",)),
@@ -192,8 +200,12 @@ def _model_ns_from_hf(hf_cfg, model_id: str, *, dtype: str, device_map: str) -> 
             f"ArchSpec preset in model/archspec.py."
         )
     ns = SimpleNamespace(
-        hf_id=model_id, dtype=dtype, device_map=device_map,
-        n_layers=int(n_layers), n_experts=int(n_experts), top_k=int(top_k or 0),
+        hf_id=model_id,
+        dtype=dtype,
+        device_map=device_map,
+        n_layers=int(n_layers),
+        n_experts=int(n_experts),
+        top_k=int(top_k or 0),
         d_model=int(d_model),
         d_expert=int(_hf_get(hf_cfg, "moe_intermediate_size", "intermediate_size", default=0) or 0),
         arch=SimpleNamespace(name=preset),
@@ -203,7 +215,8 @@ def _model_ns_from_hf(hf_cfg, model_id: str, *, dtype: str, device_map: str) -> 
         ns.routing = routing
     if mt == "lfm2_moe":
         ns.routing = SimpleNamespace(
-            scoring_func="sigmoid", use_bias=bool(_hf_get(hf_cfg, "use_expert_bias", default=False)),
+            scoring_func="sigmoid",
+            use_bias=bool(_hf_get(hf_cfg, "use_expert_bias", default=False)),
             norm_topk_prob=bool(_hf_get(hf_cfg, "norm_topk_prob", default=True)),
             routed_scaling_factor=float(_hf_get(hf_cfg, "routed_scaling_factor", default=1.0)),
             top_k=int(top_k or 0),
@@ -220,8 +233,9 @@ def _model_ns_from_hf(hf_cfg, model_id: str, *, dtype: str, device_map: str) -> 
     return ns
 
 
-def from_hf(model_id: str, *, template: str = "base",
-            dtype: str = "bfloat16", device_map: str = "auto") -> SimpleNamespace:
+def from_hf(
+    model_id: str, *, template: str = "base", dtype: str = "bfloat16", device_map: str = "auto"
+) -> SimpleNamespace:
     """Build a full config for a HuggingFace MoE model id, auto-detecting arch + dims.
 
     Non-model blocks (identify/attacks/eval) are inherited from the `template`
@@ -229,6 +243,7 @@ def from_hf(model_id: str, *, template: str = "base",
     """
     try:
         from transformers import AutoConfig
+
         hf_cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
     except UnsupportedModelError:
         raise
