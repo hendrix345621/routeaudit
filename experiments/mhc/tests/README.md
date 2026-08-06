@@ -45,7 +45,8 @@ cat artifacts/mhc_diagnostics.md
 ```
 
 `run_diagnostics.py` flags: `--quant {nf4,int8,none}`, `--n-prompts N`,
-`--tests <comma-list>`, `--leverage-steps K`, `--multilingual-file f.jsonl`, `--out path`.
+`--tests <comma-list>`, `--leverage-steps K`, `--jacobian-experts path`,
+`--jacobian-prompts N`, `--multilingual-file f.jsonl`, `--out path`.
 
 ## Why quantize for diagnostics — and when you must not
 
@@ -96,6 +97,7 @@ residual). Develop on the cheapest model with the *binding* feature:
 | 2 | **affirmative receptivity** | how close to complying → whether λ_target has signal to amplify | fwd-only |
 | 3 | **suffix-leverage probe** | **GO/NO-GO**: can a (soft-embedding) input even move the decision at t\*? if not, no text suffix can → robustness result | few grad steps |
 | 4 | **routing fingerprint** | which experts gate refusal → where to aim the routing loss / harvest | fwd-only |
+| — | **gate-Jacobian spectrum** | local gradients of V4-faithful routing mass and hard-selection margin at t\*: whether steering directions across prompts occupy a small reusable subspace | full model fwd-only + tiny router-only backward |
 | — | **selection-margin census** (`margin_census.py`) | **the other half of the GO/NO-GO**: how far each safety expert sits from falling out of the top-k, in `score + bias` units. #3's upper bound is only meaningful against this | fwd-only |
 | 7 | **routing reachability vs depth** *(paper-grounded)* | how far an input perturbation propagates into per-layer routing — decay with depth means deep safety experts are unreachable from the input. Cross with #4: can the input reach the layers that gate refusal? | fwd-only |
 | 8 | **residual norm conservation** *(paper-grounded)* | boundary hidden-norm vs depth (on the **stream-mean** under mHC) — FLAT = conservation; growth = standard residual | fwd-only |
@@ -109,9 +111,15 @@ property actually starves an input-only routing attack of leverage at depth. #7 
 model; #9 needs the n-stream internals, so it reports `skipped` on a standard residual instead of
 inventing a number.
 
-`--tests margin,affirm,leverage,routing,reachability,norm,thinking` (default); add
+`--tests margin,affirm,leverage,routing,jacobian,reachability,norm,thinking` (default); add
 `selection` and `conservation` for the two above. Multilingual needs a `--multilingual-file`
 jsonl `{lang: [translated prompts]}`.
+
+The Jacobian diagnostic reads `artifacts/safety_experts.json` by default. If that file is
+absent it falls back to the strongest selected expert for each prompt/layer and labels the
+result as an intrinsic routing spectrum rather than a safety-specific one. Hash layers are
+excluded. Gradients are taken only through a replay of the captured router, so V4's packed
+FP4 experts remain on an inference-only path.
 
 Hash-routed and dense layers are excluded from every content-based statistic — routing there is
 a token-id lookup or absent, so including them dilutes per-layer numbers with layers that cannot
@@ -128,6 +136,8 @@ move.
   post-`</think>` re-anchoring (see ../scoping.md).
 - **Multilingual gap** (6) → keep `ascii_only: false`; the cross-lingual surface is real.
 - **Flat residual norm** (8) corroborates a conservation-driven robustness story.
+- **Low gate-Jacobian rank** means candidate proposal can focus on the leading routing
+  directions; a broad spectrum argues against assuming one universal steering direction.
 
 ## Files
 - `diag_common.py` — loader (subject to the precision policy) + **one** boundary
@@ -137,6 +147,9 @@ move.
 - `refusal_tests.py` — tests 1–9 (reuse the `routeaudit` package read-only).
 - `margin_census.py` — the selection-margin census + `compare_to_leverage`, which states the
   P1 verdict from the two halves together. Also runnable standalone.
+- `gate_jacobian.py` — captures the real boundary gate input, replays only the router with
+  autograd, and reports row-normalized singular spectra per learned layer for bias-free mass
+  and bias-aware hard-selection margins.
 - `run_diagnostics.py` — load once, run the battery, write `artifacts/mhc_diagnostics.{json,md}`.
 - `synthetic_mhc.py` — a TINY, CPU-runnable, **genuine mHC** model: column-then-row Sinkhorn
   `B`, n-stream residual, hash-routed leading layers, clamped SwiGLU experts, and both released

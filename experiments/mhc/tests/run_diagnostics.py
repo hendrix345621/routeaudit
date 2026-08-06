@@ -25,11 +25,13 @@ sys.path.insert(0, str(_HERE))   # so `import diag_common` works
 if importlib.util.find_spec("routeaudit") is None:
     sys.path.insert(0, str(_HERE.parents[2] / "src"))
 
-from routeaudit import ui                                  # noqa: E402
-from routeaudit.data import read_jsonl                     # noqa: E402
-import diag_common                                          # noqa: E402
-import margin_census                                        # noqa: E402
-import refusal_tests as rt                                  # noqa: E402
+import diag_common
+import gate_jacobian
+import margin_census
+import refusal_tests as rt
+
+from routeaudit import ui
+from routeaudit.data import read_jsonl
 
 # Benign requests the model SHOULD comply with — the "complied" side of the routing
 # fingerprint (contrast against refused harmful prompts).
@@ -52,9 +54,16 @@ def main() -> None:
                    help="DIAGNOSTIC quantization to fit the model cheaply (nf4 = 4-bit)")
     p.add_argument("--advbench", default="data/advbench.jsonl")
     p.add_argument("--n-prompts", type=int, default=48)
-    p.add_argument("--tests", default="margin,affirm,leverage,routing,reachability,norm,thinking",
+    p.add_argument("--tests", default="margin,affirm,leverage,routing,jacobian,reachability,norm,thinking",
                    help="comma list: margin,affirm,leverage,selection,routing,reachability,"
-                        "norm,conservation,thinking,multilingual")
+                        "jacobian,norm,conservation,thinking,multilingual")
+    p.add_argument("--jacobian-experts", default="artifacts/safety_experts.json",
+                   help="harvested expert JSON for the Jacobian target; if missing, use each "
+                        "prompt's strongest selected expert")
+    p.add_argument("--jacobian-objectives", default="mass,margin",
+                   help="comma list drawn from: mass,margin")
+    p.add_argument("--jacobian-prompts", type=int, default=32,
+                   help="maximum prompts used for the gate-Jacobian spectrum")
     p.add_argument("--multilingual-file", default=None,
                    help="optional jsonl {lang: [prompts]} for the multilingual test")
     p.add_argument("--leverage-steps", type=int, default=60)
@@ -95,6 +104,23 @@ def main() -> None:
         ui.section("4 · routing fingerprint (refused vs complied)")
         results["routing_fingerprint"] = rt.routing_fingerprint(dm, harmful, BENIGN)
         ui.info(results["routing_fingerprint"]["takeaway"])
+    if "jacobian" in want:
+        ui.section("· gate-Jacobian spectrum (routing steering dimension)")
+        expert_path = Path(args.jacobian_experts) if args.jacobian_experts else None
+        expert_map = None
+        if expert_path is not None and expert_path.exists():
+            expert_map = gate_jacobian.load_expert_map(expert_path)
+            ui.info(f"Jacobian targets: {expert_path}")
+        else:
+            ui.warn("Jacobian expert map not found; using each prompt/layer's strongest "
+                    "currently selected expert (intrinsic spectrum, not a safety-specific claim).")
+        objectives = tuple(x.strip() for x in args.jacobian_objectives.split(",") if x.strip())
+        results["gate_jacobian"] = gate_jacobian.gate_jacobian_spectrum(
+            dm, harmful[: min(args.jacobian_prompts, len(harmful))],
+            expert_map=expert_map, objectives=objectives,
+            want_template=getattr(dm.cfg.model, "use_chat_template", True),
+        )
+        ui.info(results["gate_jacobian"]["takeaway"])
     if "reachability" in want:
         ui.section("7 · routing reachability vs depth (paper: signal propagation)")
         results["reachability"] = rt.routing_reachability_by_depth(dm, harmful[: min(24, len(harmful))])
@@ -138,12 +164,12 @@ def _write_report(path: Path, r: dict) -> None:
     g = r.get("gate", {})
     lines = [f"# mHC diagnostics — {r['model']}", "",
              f"- quant: `{r['quant']}` · prompts: {r['n_prompts']}",
-             f"- gate: `{g.get('scoring_func')}` · "
-             f"{'grouped' if g.get('grouped') else 'flat'} top-{g.get('top_k')} · "
-             f"selection bias: {g.get('use_bias')} · hash layers: {g.get('num_hash_layers')}",
+             (f"- gate: `{g.get('scoring_func')}` · "
+              f"{'grouped' if g.get('grouped') else 'flat'} top-{g.get('top_k')} · "
+              f"selection bias: {g.get('use_bias')} · hash layers: {g.get('num_hash_layers')}"),
              "", "## Takeaways (method-design signals)", ""]
     for key in ("refusal_margin", "affirmative", "leverage", "selection_margin",
-                "feasibility", "routing_fingerprint", "reachability", "residual_norm",
+                "feasibility", "routing_fingerprint", "gate_jacobian", "reachability", "residual_norm",
                 "mhc_conservation", "thinking", "multilingual"):
         if key in r:
             lines.append(f"- **{key}** — {r[key].get('takeaway', '')}")
